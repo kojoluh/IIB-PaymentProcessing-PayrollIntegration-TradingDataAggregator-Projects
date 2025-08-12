@@ -1,0 +1,304 @@
+-- Technical Indicators Calculator
+-- Calculates various technical analysis indicators for trading data
+
+CREATE COMPUTE MODULE TechnicalIndicators
+    CREATE FUNCTION Main() RETURNS BOOLEAN
+    BEGIN
+        -- Extract input data
+        DECLARE symbol CHARACTER DEFAULT InputRoot.JSON.Data.instrument.symbol;
+        DECLARE currentPrice DECIMAL DEFAULT InputRoot.JSON.Data.marketData.price;
+        DECLARE volume INTEGER DEFAULT InputRoot.JSON.Data.marketData.volume;
+        DECLARE timestamp TIMESTAMP DEFAULT InputRoot.JSON.Data.marketData.timestamp;
+        
+        -- Initialize indicators structure
+        DECLARE indicators ROW;
+        
+        -- Get historical price data (in real implementation, this would query a database)
+        DECLARE priceHistory DECIMAL ARRAY;
+        DECLARE volumeHistory INTEGER ARRAY;
+        
+        -- Simulate historical data (in production, this would be fetched from time-series DB)
+        SET priceHistory = GetPriceHistory(symbol, 50);
+        SET volumeHistory = GetVolumeHistory(symbol, 50);
+        
+        -- Calculate Simple Moving Averages
+        SET indicators.sma5 = CalculateSimpleMovingAverage(priceHistory, 5);
+        SET indicators.sma10 = CalculateSimpleMovingAverage(priceHistory, 10);
+        SET indicators.sma20 = CalculateSimpleMovingAverage(priceHistory, 20);
+        SET indicators.sma50 = CalculateSimpleMovingAverage(priceHistory, 50);
+        
+        -- Calculate Exponential Moving Average
+        SET indicators.ema12 = CalculateExponentialMovingAverage(priceHistory, 12);
+        SET indicators.ema26 = CalculateExponentialMovingAverage(priceHistory, 26);
+        
+        -- Calculate MACD (Moving Average Convergence Divergence)
+        SET indicators.macd = CalculateMACD(indicators.ema12, indicators.ema26);
+        SET indicators.macdSignal = CalculateEMA(indicators.macd, 9);
+        SET indicators.macdHistogram = indicators.macd - indicators.macdSignal;
+        
+        -- Calculate RSI (Relative Strength Index)
+        SET indicators.rsi = CalculateRSI(priceHistory, 14);
+        
+        -- Calculate Bollinger Bands
+        DECLARE bbResult ROW;
+        SET bbResult = CalculateBollingerBands(priceHistory, 20, 2);
+        SET indicators.bollingerUpper = bbResult.upper;
+        SET indicators.bollingerMiddle = bbResult.middle;
+        SET indicators.bollingerLower = bbResult.lower;
+        
+        -- Calculate Volume indicators
+        SET indicators.volumeSMA = CalculateVolumeMovingAverage(volumeHistory, 10);
+        SET indicators.volumeRatio = volume / indicators.volumeSMA;
+        
+        -- Generate trading signals
+        DECLARE signals ROW;
+        SET signals = GenerateTradingSignals(indicators, currentPrice);
+        
+        -- Build output message
+        SET OutputRoot = InputRoot;
+        SET OutputRoot.JSON.Data.technicalAnalysis.indicators = indicators;
+        SET OutputRoot.JSON.Data.technicalAnalysis.signals = signals;
+        SET OutputRoot.JSON.Data.technicalAnalysis.calculatedAt = CURRENT_TIMESTAMP;
+        SET OutputRoot.JSON.Data.technicalAnalysis.version = '1.0';
+        
+        RETURN TRUE;
+    END;
+    
+    -- Calculate Simple Moving Average
+    CREATE FUNCTION CalculateSimpleMovingAverage(IN prices DECIMAL ARRAY, IN period INTEGER) 
+        RETURNS DECIMAL
+    BEGIN
+        IF CARDINALITY(prices) < period THEN
+            RETURN NULL;
+        END IF;
+        
+        DECLARE sum DECIMAL DEFAULT 0;
+        DECLARE i INTEGER DEFAULT CARDINALITY(prices) - period + 1;
+        
+        WHILE i <= CARDINALITY(prices) DO
+            SET sum = sum + prices[i];
+            SET i = i + 1;
+        END WHILE;
+        
+        RETURN sum / period;
+    END;
+    
+    -- Calculate Exponential Moving Average
+    CREATE FUNCTION CalculateExponentialMovingAverage(IN prices DECIMAL ARRAY, IN period INTEGER) 
+        RETURNS DECIMAL
+    BEGIN
+        IF CARDINALITY(prices) < period THEN
+            RETURN NULL;
+        END IF;
+        
+        DECLARE multiplier DECIMAL DEFAULT 2.0 / (period + 1);
+        DECLARE ema DECIMAL DEFAULT prices[1];
+        DECLARE i INTEGER DEFAULT 2;
+        
+        WHILE i <= CARDINALITY(prices) DO
+            SET ema = (prices[i] * multiplier) + (ema * (1 - multiplier));
+            SET i = i + 1;
+        END WHILE;
+        
+        RETURN ema;
+    END;
+    
+    -- Calculate MACD
+    CREATE FUNCTION CalculateMACD(IN ema12 DECIMAL, IN ema26 DECIMAL) 
+        RETURNS DECIMAL
+    BEGIN
+        IF ema12 IS NULL OR ema26 IS NULL THEN
+            RETURN NULL;
+        END IF;
+        
+        RETURN ema12 - ema26;
+    END;
+    
+    -- Calculate RSI (Relative Strength Index)
+    CREATE FUNCTION CalculateRSI(IN prices DECIMAL ARRAY, IN period INTEGER) 
+        RETURNS DECIMAL
+    BEGIN
+        IF CARDINALITY(prices) <= period THEN
+            RETURN NULL;
+        END IF;
+        
+        DECLARE gains DECIMAL DEFAULT 0;
+        DECLARE losses DECIMAL DEFAULT 0;
+        DECLARE i INTEGER DEFAULT CARDINALITY(prices) - period + 1;
+        
+        -- Calculate average gains and losses
+        WHILE i <= CARDINALITY(prices) DO
+            DECLARE change DECIMAL DEFAULT prices[i] - prices[i-1];
+            IF change > 0 THEN
+                SET gains = gains + change;
+            ELSE
+                SET losses = losses + ABS(change);
+            END IF;
+            SET i = i + 1;
+        END WHILE;
+        
+        DECLARE avgGain DECIMAL DEFAULT gains / period;
+        DECLARE avgLoss DECIMAL DEFAULT losses / period;
+        
+        IF avgLoss = 0 THEN
+            RETURN 100;
+        END IF;
+        
+        DECLARE rs DECIMAL DEFAULT avgGain / avgLoss;
+        RETURN 100 - (100 / (1 + rs));
+    END;
+    
+    -- Calculate Bollinger Bands
+    CREATE FUNCTION CalculateBollingerBands(IN prices DECIMAL ARRAY, IN period INTEGER, IN stdDevMultiplier DECIMAL) 
+        RETURNS ROW
+    BEGIN
+        DECLARE result ROW;
+        
+        -- Calculate SMA (middle band)
+        SET result.middle = CalculateSimpleMovingAverage(prices, period);
+        
+        IF result.middle IS NULL THEN
+            RETURN result;
+        END IF;
+        
+        -- Calculate standard deviation
+        DECLARE variance DECIMAL DEFAULT 0;
+        DECLARE i INTEGER DEFAULT CARDINALITY(prices) - period + 1;
+        
+        WHILE i <= CARDINALITY(prices) DO
+            DECLARE deviation DECIMAL DEFAULT prices[i] - result.middle;
+            SET variance = variance + (deviation * deviation);
+            SET i = i + 1;
+        END WHILE;
+        
+        DECLARE stdDev DECIMAL DEFAULT SQRT(variance / period);
+        
+        -- Calculate upper and lower bands
+        SET result.upper = result.middle + (stdDev * stdDevMultiplier);
+        SET result.lower = result.middle - (stdDev * stdDevMultiplier);
+        
+        RETURN result;
+    END;
+    
+    -- Calculate EMA for MACD signal line
+    CREATE FUNCTION CalculateEMA(IN value DECIMAL, IN period INTEGER) 
+        RETURNS DECIMAL
+    BEGIN
+        -- Simplified EMA calculation for single value
+        -- In real implementation, this would maintain historical EMA values
+        RETURN value; -- Placeholder
+    END;
+    
+    -- Calculate Volume Moving Average
+    CREATE FUNCTION CalculateVolumeMovingAverage(IN volumes INTEGER ARRAY, IN period INTEGER) 
+        RETURNS DECIMAL
+    BEGIN
+        IF CARDINALITY(volumes) < period THEN
+            RETURN NULL;
+        END IF;
+        
+        DECLARE sum INTEGER DEFAULT 0;
+        DECLARE i INTEGER DEFAULT CARDINALITY(volumes) - period + 1;
+        
+        WHILE i <= CARDINALITY(volumes) DO
+            SET sum = sum + volumes[i];
+            SET i = i + 1;
+        END WHILE;
+        
+        RETURN CAST(sum AS DECIMAL) / period;
+    END;
+    
+    -- Generate Trading Signals
+    CREATE FUNCTION GenerateTradingSignals(IN indicators ROW, IN currentPrice DECIMAL) 
+        RETURNS ROW
+    BEGIN
+        DECLARE signals ROW;
+        
+        -- Moving Average Crossover Signals
+        IF indicators.sma5 > indicators.sma20 THEN
+            SET signals.maSignal = 'BUY';
+        ELSEIF indicators.sma5 < indicators.sma20 THEN
+            SET signals.maSignal = 'SELL';
+        ELSE
+            SET signals.maSignal = 'HOLD';
+        END IF;
+        
+        -- RSI Overbought/Oversold Signals
+        IF indicators.rsi > 70 THEN
+            SET signals.rsiSignal = 'OVERBOUGHT';
+        ELSEIF indicators.rsi < 30 THEN
+            SET signals.rsiSignal = 'OVERSOLD';
+        ELSE
+            SET signals.rsiSignal = 'NEUTRAL';
+        END IF;
+        
+        -- Bollinger Bands Signals
+        IF currentPrice > indicators.bollingerUpper THEN
+            SET signals.bbSignal = 'SELL_SIGNAL';
+        ELSEIF currentPrice < indicators.bollingerLower THEN
+            SET signals.bbSignal = 'BUY_SIGNAL';
+        ELSE
+            SET signals.bbSignal = 'NEUTRAL';
+        END IF;
+        
+        -- MACD Signals
+        IF indicators.macd > indicators.macdSignal THEN
+            SET signals.macdSignal = 'BULLISH';
+        ELSE
+            SET signals.macdSignal = 'BEARISH';
+        END IF;
+        
+        -- Overall Signal Strength
+        DECLARE signalStrength INTEGER DEFAULT 0;
+        
+        IF signals.maSignal = 'BUY' THEN SET signalStrength = signalStrength + 1; END IF;
+        IF signals.rsiSignal = 'OVERSOLD' THEN SET signalStrength = signalStrength + 1; END IF;
+        IF signals.bbSignal = 'BUY_SIGNAL' THEN SET signalStrength = signalStrength + 1; END IF;
+        IF signals.macdSignal = 'BULLISH' THEN SET signalStrength = signalStrength + 1; END IF;
+        
+        SET signals.overallSignal = CASE
+            WHEN signalStrength >= 3 THEN 'STRONG_BUY'
+            WHEN signalStrength = 2 THEN 'BUY'
+            WHEN signalStrength = 1 THEN 'WEAK_BUY'
+            WHEN signalStrength = 0 THEN 'HOLD'
+            ELSE 'SELL'
+        END;
+        
+        RETURN signals;
+    END;
+    
+    -- Helper functions to get historical data (simulated)
+    CREATE FUNCTION GetPriceHistory(IN symbol CHARACTER, IN periods INTEGER) 
+        RETURNS DECIMAL ARRAY
+    BEGIN
+        -- In real implementation, this would query time-series database
+        -- Returning simulated data for demonstration
+        DECLARE prices DECIMAL ARRAY;
+        DECLARE i INTEGER DEFAULT 1;
+        DECLARE basePrice DECIMAL DEFAULT 100.0;
+        
+        WHILE i <= periods DO
+            SET prices[i] = basePrice + (RANDOM() * 10 - 5); -- Random price around 100
+            SET basePrice = prices[i]; -- Use previous price as base
+            SET i = i + 1;
+        END WHILE;
+        
+        RETURN prices;
+    END;
+    
+    CREATE FUNCTION GetVolumeHistory(IN symbol CHARACTER, IN periods INTEGER) 
+        RETURNS INTEGER ARRAY
+    BEGIN
+        -- Simulated volume history
+        DECLARE volumes INTEGER ARRAY;
+        DECLARE i INTEGER DEFAULT 1;
+        
+        WHILE i <= periods DO
+            SET volumes[i] = CAST(RANDOM() * 1000000 AS INTEGER); -- Random volume
+            SET i = i + 1;
+        END WHILE;
+        
+        RETURN volumes;
+    END;
+    
+END MODULE;

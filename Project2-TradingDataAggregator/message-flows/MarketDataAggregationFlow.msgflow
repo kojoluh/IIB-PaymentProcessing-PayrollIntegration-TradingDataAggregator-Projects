@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MessageFlow>
+    <eClassVersion>12.3.0</eClassVersion>
+    <nodes>
+        <!-- Input Nodes -->
+        <node xmi:type="TCPIPClientInput" xmi:id="MarketDataInput" location="50,100">
+            <connectionDetails>
+                <hostname>market-data-feed.exchange.com</hostname>
+                <port>9001</port>
+            </connectionDetails>
+            <MessageDomain>BLOB</MessageDomain>
+        </node>
+        
+        <node xmi:type="HTTPInput" xmi:id="RESTDataInput" location="50,200">
+            <URLSpecifier>/api/market-data</URLSpecifier>
+            <MessageDomain>JSON</MessageDomain>
+        </node>
+        
+        <node xmi:type="MQInput" xmi:id="NewsDataInput" location="50,300">
+            <queueName>NEWS.FEED</queueName>
+            <MessageDomain>JSON</MessageDomain>
+        </node>
+        
+        <!-- Processing Pipeline -->
+        <node xmi:type="Compute" xmi:id="DataParser" location="200,150">
+            <computeExpression>esql://MarketDataParser#MarketDataParser.Main</computeExpression>
+        </node>
+        
+        <node xmi:type="Filter" xmi:id="DataFilter" location="350,150">
+            <filterExpression>InputRoot.JSON.Data.instrument.symbol IS NOT NULL</filterExpression>
+        </node>
+        
+        <node xmi:type="Compute" xmi:id="DataNormalizer" location="500,150">
+            <computeExpression>esql://DataNormalizer#DataNormalizer.Main</computeExpression>
+        </node>
+        
+        <node xmi:type="Route" xmi:id="ProcessingRoute" location="650,150">
+            <routingExpression>InputRoot.JSON.Data.requiresAnalysis</routingExpression>
+        </node>
+        
+        <!-- Technical Analysis Branch -->
+        <node xmi:type="Compute" xmi:id="TechnicalAnalysis" location="800,100">
+            <computeExpression>esql://TechnicalIndicators#TechnicalIndicators.Main</computeExpression>
+        </node>
+        
+        <node xmi:type="Compute" xmi:id="RiskAnalysis" location="950,100">
+            <computeExpression>esql://RiskAnalytics#RiskAnalytics.Main</computeExpression>
+        </node>
+        
+        <!-- Data Quality Control -->
+        <node xmi:type="Compute" xmi:id="QualityControl" location="800,200">
+            <computeExpression>esql://DataValidator#DataValidator.Main</computeExpression>
+        </node>
+        
+        <!-- Distribution Nodes -->
+        <node xmi:type="Publication" xmi:id="RealtimePublisher" location="1100,80">
+            <topicName>REALTIME.MARKET.DATA</topicName>
+        </node>
+        
+        <node xmi:type="HTTPRequest" xmi:id="TradingSystemNotify" location="1100,120">
+            <URL>http://trading-system.internal/api/market-update</URL>
+            <method>POST</method>
+        </node>
+        
+        <node xmi:type="Database" xmi:id="DataWarehouse" location="1100,160">
+            <dataSourceName>MarketDataDB</dataSourceName>
+            <statement>INSERT INTO market_data_stream (symbol, price, volume, timestamp, indicators) VALUES (?, ?, ?, ?, ?)</statement>
+        </node>
+        
+        <node xmi:type="WebSocketPublish" xmi:id="WebSocketStream" location="1100,200">
+            <endpointPath>/ws/market-data</endpointPath>
+        </node>
+        
+        <!-- Alert Generation -->
+        <node xmi:type="Compute" xmi:id="AlertGenerator" location="950,250">
+            <computeExpression>esql://AlertGenerator#AlertGenerator.Main</computeExpression>
+        </node>
+        
+        <node xmi:type="MQOutput" xmi:id="AlertOutput" location="1100,250">
+            <queueName>TRADING.ALERTS</queueName>
+        </node>
+        
+        <!-- Error Handling -->
+        <node xmi:type="Catch" xmi:id="ErrorHandler" location="500,300">
+            <catchTerminal>Error</catchTerminal>
+        </node>
+        
+        <node xmi:type="Compute" xmi:id="ErrorProcessor" location="650,300">
+            <computeExpression>esql://ErrorHandler#ErrorHandler.ProcessError</computeExpression>
+        </node>
+        
+        <node xmi:type="MQOutput" xmi:id="ErrorQueue" location="800,300">
+            <queueName>ERROR.QUEUE</queueName>
+        </node>
+    </nodes>
+    
+    <!-- Connections -->
+    <connections>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_1" sourceNode="MarketDataInput" targetNode="DataParser"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_2" sourceNode="RESTDataInput" targetNode="DataParser"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_3" sourceNode="NewsDataInput" targetNode="DataParser"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_4" sourceNode="DataParser" targetNode="DataFilter"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_5" sourceNode="DataFilter" targetNode="DataNormalizer"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_6" sourceNode="DataNormalizer" targetNode="ProcessingRoute"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_7" sourceNode="ProcessingRoute" targetNode="TechnicalAnalysis" sourceTerminal="out" targetTerminal="in">
+            <routingOutputTerminal terminal="analytics" filterExpression="true"/>
+        </connection>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_8" sourceNode="ProcessingRoute" targetNode="QualityControl" sourceTerminal="out" targetTerminal="in">
+            <routingOutputTerminal terminal="quality" filterExpression="false"/>
+        </connection>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_9" sourceNode="TechnicalAnalysis" targetNode="RiskAnalysis"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_10" sourceNode="RiskAnalysis" targetNode="RealtimePublisher"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_11" sourceNode="RiskAnalysis" targetNode="TradingSystemNotify"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_12" sourceNode="RiskAnalysis" targetNode="DataWarehouse"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_13" sourceNode="RiskAnalysis" targetNode="WebSocketStream"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_14" sourceNode="QualityControl" targetNode="AlertGenerator"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_15" sourceNode="AlertGenerator" targetNode="AlertOutput"/>
+        
+        <!-- Error handling connections -->
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_16" sourceNode="DataParser" targetNode="ErrorHandler" sourceTerminal="failure" targetTerminal="in"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_17" sourceNode="ErrorHandler" targetNode="ErrorProcessor"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_18" sourceNode="ErrorProcessor" targetNode="ErrorQueue"/>
+    </connections>
+    
+    <!-- Properties -->
+    <properties>
+        <property name="shortDescription" value="Trading Data Aggregation Flow"/>
+        <property name="longDescription" value="Aggregates and processes real-time market data with technical analysis and risk calculations"/>
+    </properties>
+</MessageFlow>

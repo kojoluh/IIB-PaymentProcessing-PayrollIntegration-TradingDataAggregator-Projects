@@ -1,0 +1,265 @@
+-- Alert Generator Module for Trading System Monitoring
+-- Generates alerts based on market conditions and system events
+
+CREATE COMPUTE MODULE AlertGenerator
+
+    -- Main alert generation function
+    CREATE FUNCTION Main() RETURNS BOOLEAN
+    BEGIN
+        DECLARE alertType CHARACTER;
+        DECLARE alertSeverity CHARACTER DEFAULT 'INFO';
+        DECLARE alertMessage CHARACTER;
+        DECLARE shouldAlert BOOLEAN DEFAULT FALSE;
+        DECLARE correlationId CHARACTER;
+        
+        -- Get correlation ID
+        SET correlationId = COALESCE(InputRoot.HTTPInputHeader."X-Correlation-ID",
+                                   CommonUtils.GenerateTransactionId());
+        
+        -- Check for price movement alerts
+        IF CheckPriceMovementAlert() THEN
+            SET shouldAlert = TRUE;
+            SET alertType = 'PRICE_MOVEMENT';
+            SET alertSeverity = 'HIGH';
+            SET alertMessage = 'Significant price movement detected';
+        END IF;
+        
+        -- Check for volume spike alerts
+        IF CheckVolumeSpike() THEN
+            SET shouldAlert = TRUE;
+            SET alertType = 'VOLUME_SPIKE';
+            SET alertSeverity = 'MEDIUM';
+            SET alertMessage = 'Unusual volume activity detected';
+        END IF;
+        
+        -- Check for data quality alerts
+        IF CheckDataQualityAlert() THEN
+            SET shouldAlert = TRUE;
+            SET alertType = 'DATA_QUALITY';
+            SET alertSeverity = 'MEDIUM';
+            SET alertMessage = 'Data quality issues detected';
+        END IF;
+        
+        -- Check for system performance alerts
+        IF CheckSystemPerformanceAlert() THEN
+            SET shouldAlert = TRUE;
+            SET alertType = 'SYSTEM_PERFORMANCE';
+            SET alertSeverity = 'HIGH';
+            SET alertMessage = 'System performance degradation detected';
+        END IF;
+        
+        -- Generate alert if conditions are met
+        IF shouldAlert THEN
+            CALL GenerateAlert(alertType, alertSeverity, alertMessage, correlationId);
+            CALL LogAlert(alertType, alertSeverity, alertMessage, correlationId);
+        END IF;
+        
+        -- Always copy input to output
+        SET OutputRoot = InputRoot;
+        
+        RETURN TRUE;
+    END;
+    
+    -- Check for significant price movements
+    CREATE FUNCTION CheckPriceMovementAlert() RETURNS BOOLEAN
+    BEGIN
+        DECLARE currentPrice DECIMAL DEFAULT InputRoot.JSON.Data.price;
+        DECLARE symbol CHARACTER DEFAULT InputRoot.JSON.Data.symbol;
+        DECLARE priceChangeThreshold DECIMAL DEFAULT 0.05; -- 5% threshold
+        
+        -- Get previous price (simplified - would query database in real implementation)
+        DECLARE previousPrice DECIMAL DEFAULT GetPreviousPrice(symbol);
+        
+        IF previousPrice > 0 THEN
+            DECLARE priceChange DECIMAL DEFAULT ABS(currentPrice - previousPrice) / previousPrice;
+            
+            IF priceChange >= priceChangeThreshold THEN
+                SET InputLocalEnvironment.Variables.PriceChange = priceChange;
+                SET InputLocalEnvironment.Variables.PreviousPrice = previousPrice;
+                SET InputLocalEnvironment.Variables.CurrentPrice = currentPrice;
+                RETURN TRUE;
+            END IF;
+        END IF;
+        
+        RETURN FALSE;
+    END;
+    
+    -- Check for volume spikes
+    CREATE FUNCTION CheckVolumeSpike() RETURNS BOOLEAN
+    BEGIN
+        DECLARE currentVolume INTEGER DEFAULT InputRoot.JSON.Data.volume;
+        DECLARE symbol CHARACTER DEFAULT InputRoot.JSON.Data.symbol;
+        DECLARE volumeThreshold DECIMAL DEFAULT 3.0; -- 3x average volume
+        
+        -- Get average volume (simplified - would calculate from historical data)
+        DECLARE averageVolume INTEGER DEFAULT GetAverageVolume(symbol);
+        
+        IF averageVolume > 0 AND currentVolume > (averageVolume * volumeThreshold) THEN
+            SET InputLocalEnvironment.Variables.VolumeSpike = 
+                CAST(currentVolume / averageVolume AS CHARACTER) || 'x average';
+            RETURN TRUE;
+        END IF;
+        
+        RETURN FALSE;
+    END;
+    
+    -- Check for data quality issues
+    CREATE FUNCTION CheckDataQualityAlert() RETURNS BOOLEAN
+    BEGIN
+        -- Check if there are validation warnings or data inconsistencies
+        IF EXISTS(InputRoot.JSON.Data.warnings[]) THEN
+            SET InputLocalEnvironment.Variables.DataQualityIssue = InputRoot.JSON.Data.warnings;
+            RETURN TRUE;
+        END IF;
+        
+        -- Check for stale data (older than 5 minutes)
+        DECLARE dataTimestamp TIMESTAMP;
+        DECLARE timeDiff INTERVAL;
+        
+        BEGIN
+            SET dataTimestamp = CAST(InputRoot.JSON.Data.timestamp AS TIMESTAMP);
+            SET timeDiff = CURRENT_TIMESTAMP - dataTimestamp;
+            
+            IF EXTRACT(MINUTE FROM timeDiff) > 5 THEN
+                SET InputLocalEnvironment.Variables.DataQualityIssue = 'Stale data detected';
+                RETURN TRUE;
+            END IF;
+        EXCEPTION
+            SET InputLocalEnvironment.Variables.DataQualityIssue = 'Invalid timestamp format';
+            RETURN TRUE;
+        END;
+        
+        RETURN FALSE;
+    END;
+    
+    -- Check system performance issues
+    CREATE FUNCTION CheckSystemPerformanceAlert() RETURNS BOOLEAN
+    BEGIN
+        -- Check processing latency (simplified)
+        DECLARE processingTime INTERVAL;
+        DECLARE processingTimeMs INTEGER;
+        
+        IF EXISTS(InputLocalEnvironment.Variables.ProcessingStartTime[]) THEN
+            SET processingTime = CURRENT_TIMESTAMP - 
+                CAST(InputLocalEnvironment.Variables.ProcessingStartTime AS TIMESTAMP);
+            SET processingTimeMs = EXTRACT(SECOND FROM processingTime) * 1000;
+            
+            -- Alert if processing takes more than 1 second
+            IF processingTimeMs > 1000 THEN
+                SET InputLocalEnvironment.Variables.ProcessingLatency = 
+                    CAST(processingTimeMs AS CHARACTER) || 'ms';
+                RETURN TRUE;
+            END IF;
+        END IF;
+        
+        RETURN FALSE;
+    END;
+    
+    -- Generate alert message and send to alert queue
+    CREATE PROCEDURE GenerateAlert(
+        IN alertType CHARACTER,
+        IN alertSeverity CHARACTER,
+        IN alertMessage CHARACTER,
+        IN correlationId CHARACTER
+    )
+    BEGIN
+        CREATE LASTCHILD OF OutputRoot DOMAIN('JSON');
+        
+        -- Create alert payload
+        SET OutputRoot.JSON.Data.alertType = alertType;
+        SET OutputRoot.JSON.Data.severity = alertSeverity;
+        SET OutputRoot.JSON.Data.message = alertMessage;
+        SET OutputRoot.JSON.Data.correlationId = correlationId;
+        SET OutputRoot.JSON.Data.timestamp = CAST(CURRENT_TIMESTAMP AS CHARACTER);
+        SET OutputRoot.JSON.Data.source = 'TradingDataAggregator';
+        
+        -- Add market data context
+        IF EXISTS(InputRoot.JSON.Data.symbol[]) THEN
+            SET OutputRoot.JSON.Data.context.symbol = InputRoot.JSON.Data.symbol;
+            SET OutputRoot.JSON.Data.context.price = InputRoot.JSON.Data.price;
+            SET OutputRoot.JSON.Data.context.volume = InputRoot.JSON.Data.volume;
+        END IF;
+        
+        -- Add specific alert details
+        CASE alertType
+            WHEN 'PRICE_MOVEMENT' THEN
+                SET OutputRoot.JSON.Data.details.priceChange = 
+                    InputLocalEnvironment.Variables.PriceChange;
+                SET OutputRoot.JSON.Data.details.previousPrice = 
+                    InputLocalEnvironment.Variables.PreviousPrice;
+                SET OutputRoot.JSON.Data.details.currentPrice = 
+                    InputLocalEnvironment.Variables.CurrentPrice;
+            WHEN 'VOLUME_SPIKE' THEN
+                SET OutputRoot.JSON.Data.details.volumeSpike = 
+                    InputLocalEnvironment.Variables.VolumeSpike;
+            WHEN 'DATA_QUALITY' THEN
+                SET OutputRoot.JSON.Data.details.issue = 
+                    InputLocalEnvironment.Variables.DataQualityIssue;
+            WHEN 'SYSTEM_PERFORMANCE' THEN
+                SET OutputRoot.JSON.Data.details.latency = 
+                    InputLocalEnvironment.Variables.ProcessingLatency;
+        END CASE;
+        
+        -- Set alert ID for tracking
+        SET OutputRoot.JSON.Data.alertId = CommonUtils.GenerateTransactionId();
+    END;
+    
+    -- Log alert to database
+    CREATE PROCEDURE LogAlert(
+        IN alertType CHARACTER,
+        IN alertSeverity CHARACTER,
+        IN alertMessage CHARACTER,
+        IN correlationId CHARACTER
+    )
+    BEGIN
+        DECLARE alertDetails CHARACTER;
+        
+        -- Build alert details
+        SET alertDetails = 'Alert Type: ' || alertType ||
+                          ', Severity: ' || alertSeverity ||
+                          ', Symbol: ' || COALESCE(InputRoot.JSON.Data.symbol, 'N/A') ||
+                          ', Price: ' || COALESCE(CAST(InputRoot.JSON.Data.price AS CHARACTER), 'N/A') ||
+                          ', Volume: ' || COALESCE(CAST(InputRoot.JSON.Data.volume AS CHARACTER), 'N/A');
+        
+        -- Log to error/event table
+        INSERT INTO Database.IIBCONFIG.error_log 
+        (application_name, error_type, error_message, stack_trace, correlation_id, occurred_date)
+        VALUES (
+            'TradingDataAggregator', 
+            'ALERT_' || alertType, 
+            alertMessage,
+            alertDetails,
+            correlationId, 
+            CURRENT_TIMESTAMP
+        );
+        
+        -- Update metrics
+        INSERT INTO Database.IIBCONFIG.system_metrics 
+        (metric_name, metric_value, metric_unit, application_name, host_name, recorded_date)
+        VALUES (
+            'ALERT_' || alertType || '_COUNT', 
+            1, 
+            'count', 
+            'TradingDataAggregator', 
+            SQL.DATABASENAME,
+            CURRENT_TIMESTAMP
+        );
+    END;
+    
+    -- Get previous price for symbol (stub implementation)
+    CREATE FUNCTION GetPreviousPrice(IN symbol CHARACTER) RETURNS DECIMAL
+    BEGIN
+        -- In real implementation, this would query the database
+        -- For demo, return a default value
+        RETURN 100.0;
+    END;
+    
+    -- Get average volume for symbol (stub implementation)
+    CREATE FUNCTION GetAverageVolume(IN symbol CHARACTER) RETURNS INTEGER
+    BEGIN
+        -- In real implementation, this would calculate from historical data
+        -- For demo, return a default value
+        RETURN 1000000;
+    END;
+
+END MODULE;

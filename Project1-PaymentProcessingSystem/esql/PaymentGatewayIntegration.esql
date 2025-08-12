@@ -1,0 +1,106 @@
+-- Payment Gateway Integration Module
+-- Handles integration with external payment gateways
+
+CREATE COMPUTE MODULE PaymentGatewayIntegration
+    CREATE FUNCTION Main() RETURNS BOOLEAN
+    BEGIN
+        -- Extract payment details
+        DECLARE paymentMethod CHARACTER DEFAULT InputRoot.JSON.Data.payment.method;
+        DECLARE amount DECIMAL DEFAULT InputRoot.JSON.Data.payment.amount;
+        DECLARE currency CHARACTER DEFAULT InputRoot.JSON.Data.payment.currency;
+        DECLARE cardNumber CHARACTER DEFAULT InputRoot.JSON.Data.payment.cardNumber;
+        DECLARE gatewayResponse ROW;
+        
+        -- Route to appropriate gateway based on payment method
+        IF paymentMethod = 'CREDIT_CARD' OR paymentMethod = 'DEBIT_CARD' THEN
+            SET gatewayResponse = ProcessCardPayment(amount, currency, cardNumber);
+        ELSEIF paymentMethod = 'BANK_TRANSFER' THEN
+            SET gatewayResponse = ProcessBankTransfer(amount, currency);
+        ELSEIF paymentMethod = 'DIGITAL_WALLET' THEN
+            SET gatewayResponse = ProcessDigitalWallet(amount, currency);
+        ELSE
+            SET gatewayResponse.success = FALSE;
+            SET gatewayResponse.errorMessage = 'Unsupported payment method';
+        END IF;
+        
+        -- Build response message
+        SET OutputRoot = InputRoot;
+        SET OutputRoot.JSON.Data.gateway = gatewayResponse;
+        SET OutputRoot.JSON.Data.processedAt = CURRENT_TIMESTAMP;
+        
+        RETURN TRUE;
+    END;
+    
+    -- Process credit/debit card payments
+    CREATE FUNCTION ProcessCardPayment(IN amount DECIMAL, IN currency CHARACTER, IN cardNumber CHARACTER) 
+        RETURNS ROW
+    BEGIN
+        DECLARE response ROW;
+        DECLARE maskedCardNumber CHARACTER;
+        
+        -- Mask card number for security
+        SET maskedCardNumber = SUBSTRING(cardNumber FROM 1 FOR 4) || '****' || SUBSTRING(cardNumber FROM -4);
+        
+        -- Simulate payment gateway call
+        -- In real implementation, this would make HTTP requests to Stripe, PayPal, etc.
+        
+        -- Simulate successful authorization
+        IF amount <= 50000 THEN -- Simulate approval for amounts under $50,000
+            SET response.success = TRUE;
+            SET response.transactionId = 'TXN_' || CAST(CURRENT_TIMESTAMP AS CHARACTER);
+            SET response.authorizationCode = 'AUTH_' || CAST(RANDOM() * 1000000 AS CHARACTER);
+            SET response.gatewayName = 'StripeGateway';
+            SET response.maskedCardNumber = maskedCardNumber;
+            SET response.status = 'AUTHORIZED';
+        ELSE
+            SET response.success = FALSE;
+            SET response.errorMessage = 'Transaction declined by gateway';
+            SET response.errorCode = 'DECLINED_HIGH_AMOUNT';
+            SET response.status = 'DECLINED';
+        END IF;
+        
+        SET response.processedAmount = amount;
+        SET response.currency = currency;
+        SET response.timestamp = CURRENT_TIMESTAMP;
+        
+        RETURN response;
+    END;
+    
+    -- Process bank transfer payments
+    CREATE FUNCTION ProcessBankTransfer(IN amount DECIMAL, IN currency CHARACTER) 
+        RETURNS ROW
+    BEGIN
+        DECLARE response ROW;
+        
+        -- Simulate ACH/Wire transfer processing
+        SET response.success = TRUE;
+        SET response.transactionId = 'ACH_' || CAST(CURRENT_TIMESTAMP AS CHARACTER);
+        SET response.gatewayName = 'FedWireSystem';
+        SET response.status = 'PENDING';
+        SET response.estimatedSettlement = CURRENT_TIMESTAMP + INTERVAL '1' DAY;
+        SET response.processedAmount = amount;
+        SET response.currency = currency;
+        SET response.timestamp = CURRENT_TIMESTAMP;
+        
+        RETURN response;
+    END;
+    
+    -- Process digital wallet payments
+    CREATE FUNCTION ProcessDigitalWallet(IN amount DECIMAL, IN currency CHARACTER) 
+        RETURNS ROW
+    BEGIN
+        DECLARE response ROW;
+        
+        -- Simulate digital wallet processing (PayPal, Apple Pay, etc.)
+        SET response.success = TRUE;
+        SET response.transactionId = 'WALLET_' || CAST(CURRENT_TIMESTAMP AS CHARACTER);
+        SET response.gatewayName = 'PayPalGateway';
+        SET response.status = 'COMPLETED';
+        SET response.processedAmount = amount;
+        SET response.currency = currency;
+        SET response.timestamp = CURRENT_TIMESTAMP;
+        
+        RETURN response;
+    END;
+    
+END MODULE;

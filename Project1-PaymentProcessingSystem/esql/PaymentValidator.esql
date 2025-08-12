@@ -1,0 +1,60 @@
+-- Payment Validation ESQL Module
+-- Validates payment amounts, currencies, and account information
+
+CREATE COMPUTE MODULE PaymentValidator
+    CREATE FUNCTION Main() RETURNS BOOLEAN
+    BEGIN
+        -- Declare variables for payment validation
+        DECLARE paymentAmount DECIMAL;
+        DECLARE currency CHARACTER;
+        DECLARE accountNumber CHARACTER;
+        DECLARE paymentMethod CHARACTER;
+        DECLARE validationResult BOOLEAN DEFAULT TRUE;
+        DECLARE errorMessage CHARACTER DEFAULT '';
+        
+        -- Extract payment data from input message
+        SET paymentAmount = InputRoot.JSON.Data.payment.amount;
+        SET currency = InputRoot.JSON.Data.payment.currency;
+        SET accountNumber = InputRoot.JSON.Data.payment.accountNumber;
+        SET paymentMethod = InputRoot.JSON.Data.payment.method;
+        
+        -- Validate payment amount
+        IF paymentAmount IS NULL OR paymentAmount <= 0 THEN
+            SET validationResult = FALSE;
+            SET errorMessage = errorMessage || 'Invalid payment amount. ';
+        END IF;
+        
+        -- Check maximum transaction limits
+        IF paymentAmount > 100000 THEN
+            SET validationResult = FALSE;
+            SET errorMessage = errorMessage || 'Amount exceeds maximum limit. ';
+        END IF;
+        
+        -- Validate currency
+        IF currency NOT IN ('USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD') THEN
+            SET validationResult = FALSE;
+            SET errorMessage = errorMessage || 'Unsupported currency. ';
+        END IF;
+        
+        -- Validate account number format
+        IF LENGTH(accountNumber) < 8 OR LENGTH(accountNumber) > 20 THEN
+            SET validationResult = FALSE;
+            SET errorMessage = errorMessage || 'Invalid account number format. ';
+        END IF;
+        
+        -- Validate payment method
+        IF paymentMethod NOT IN ('CREDIT_CARD', 'DEBIT_CARD', 'BANK_TRANSFER', 'DIGITAL_WALLET') THEN
+            SET validationResult = FALSE;
+            SET errorMessage = errorMessage || 'Unsupported payment method. ';
+        END IF;
+        
+        -- Set validation results in output message
+        SET OutputRoot = InputRoot;
+        SET OutputRoot.JSON.Data.validation.isValid = validationResult;
+        SET OutputRoot.JSON.Data.validation.errorMessage = TRIM(errorMessage);
+        SET OutputRoot.JSON.Data.validation.timestamp = CURRENT_TIMESTAMP;
+        SET OutputRoot.JSON.Data.validation.validatedBy = 'PaymentValidator';
+        
+        RETURN TRUE;
+    END;
+END MODULE;

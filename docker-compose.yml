@@ -1,0 +1,323 @@
+version: '3.8'
+
+services:
+  # IBM App Connect Enterprise (ACE) - Main Integration Server
+  ace-server:
+    image: ibmcom/ace:${ACE_VERSION:-latest}
+    container_name: ace-server
+    hostname: ace-server
+    platform: ${DOCKER_DEFAULT_PLATFORM:-linux/amd64}
+    ports:
+      - "7600:7600"   # Administration port
+      - "7800:7800"   # Payment Processing EG HTTP port
+      - "7801:7801"   # Trading Data EG HTTP port
+      - "7802:7802"   # Monitoring EG port
+      - "9443:9443"   # ACE Web UI
+    environment:
+      - LICENSE=accept
+      - ACE_SERVER_NAME=ACESERVER
+      - ACE_ENABLE_METRICS=true
+      - ACE_LOG_LEVEL=INFO
+    mem_limit: ${ACE_MEMORY_LIMIT:-4g}
+    volumes:
+      - ./deployment/bars:/home/aceuser/bars
+      - ./deployment/config:/home/aceuser/config
+      - ./deployment/logs:/home/aceuser/logs
+      - ace-work:/home/aceuser/ace-server
+    networks:
+      - iib-network
+    depends_on:
+      - postgresql
+      - influxdb
+      - ibm-mq
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:7600/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # IBM MQ - Message Queue Manager
+  ibm-mq:
+    image: ibmcom/mq:${MQ_VERSION:-latest}
+    container_name: ibm-mq
+    hostname: ibm-mq
+    platform: ${DOCKER_DEFAULT_PLATFORM:-linux/amd64}
+    ports:
+      - "1414:1414"   # MQ Client port
+      - "9444:9443"   # MQ Web Console (avoiding conflict with ACE)
+      - "9157:9157"   # MQ metrics port
+    environment:
+      - LICENSE=accept
+      - MQ_QMGR_NAME=QM_IIB
+      - MQ_APP_PASSWORD=password123
+      - MQ_ADMIN_PASSWORD=admin123
+      - MQ_ENABLE_METRICS=true
+    volumes:
+      - mq-data:/mnt/mqm
+      - ./config/mq:/etc/mqm
+    networks:
+      - iib-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "dspmq | grep 'QM_IIB' | grep 'Running' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Oracle Database XE - Payment Processing Database
+  oracle-xe:
+    image: container-registry.oracle.com/database/express:21.3.0-xe
+    container_name: oracle-xe
+    hostname: oracle-xe
+    ports:
+      - "1521:1521"   # Oracle DB port
+      - "5500:5500"   # Oracle Enterprise Manager
+    environment:
+      - ORACLE_PWD=password123
+      - ORACLE_CHARACTERSET=AL32UTF8
+      - ORACLE_ENABLE_ARCHIVELOG=false
+    volumes:
+      - oracle-data:/opt/oracle/oradata
+      - ./sql/oracle/init:/docker-entrypoint-initdb.d
+      - ./sql/oracle/scripts:/opt/oracle/scripts
+    networks:
+      - iib-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "sqlplus -s system/password123@localhost:1521/XE <<< 'SELECT 1 FROM DUAL;' || exit 1"]
+      interval: 60s
+      timeout: 30s
+      retries: 5
+
+  # PostgreSQL - Configuration and Audit Database
+  postgresql:
+    image: ${POSTGRES_IMAGE:-postgres:15-alpine}
+    container_name: postgresql
+    hostname: postgresql
+    platform: ${DOCKER_DEFAULT_PLATFORM:-linux/amd64}
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=iib_config
+      - POSTGRES_USER=iib_user
+      - POSTGRES_PASSWORD=password123
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./sql/postgres/init:/docker-entrypoint-initdb.d
+    networks:
+      - iib-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iib_user -d iib_config"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # InfluxDB - Time Series Database for Market Data
+  influxdb:
+    image: influxdb:2.7-alpine
+    container_name: influxdb
+    hostname: influxdb
+    ports:
+      - "8086:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=password123
+      - DOCKER_INFLUXDB_INIT_ORG=trading-org
+      - DOCKER_INFLUXDB_INIT_BUCKET=market-data
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=iib-trading-token-12345
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+      - influxdb-config:/etc/influxdb2
+    networks:
+      - iib-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "influx ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Redis - Caching Layer
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    hostname: redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --requirepass password123
+    volumes:
+      - redis-data:/data
+    networks:
+      - iib-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Elasticsearch - Centralized Logging
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.8.2
+    container_name: elasticsearch
+    hostname: elasticsearch
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    environment:
+      - node.name=elasticsearch
+      - cluster.name=iib-cluster
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms1g -Xmx2g"
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - xpack.security.transport.ssl.enabled=false
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    networks:
+      - iib-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Kibana - Log Visualization
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.8.2
+    container_name: kibana
+    hostname: kibana
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - SERVER_NAME=kibana
+      - SERVER_HOST=0.0.0.0
+    volumes:
+      - kibana-data:/usr/share/kibana/data
+    networks:
+      - iib-network
+    depends_on:
+      - elasticsearch
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5601/api/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Prometheus - Metrics Collection
+  prometheus:
+    image: prom/prometheus:v2.44.0
+    container_name: prometheus
+    hostname: prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    networks:
+      - iib-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9090/-/healthy || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Grafana - Metrics Visualization
+  grafana:
+    image: grafana/grafana:10.0.3
+    container_name: grafana
+    hostname: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+    networks:
+      - iib-network
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Nginx - Load Balancer and Reverse Proxy
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: nginx
+    hostname: nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config/nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./config/nginx/ssl:/etc/nginx/ssl
+      - ./config/nginx/conf.d:/etc/nginx/conf.d
+    networks:
+      - iib-network
+    depends_on:
+      - ace-server
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  ace-work:
+    driver: local
+  oracle-data:
+    driver: local
+  postgres-data:
+    driver: local
+  influxdb-data:
+    driver: local
+  influxdb-config:
+    driver: local
+  mq-data:
+    driver: local
+  redis-data:
+    driver: local
+  es-data:
+    driver: local
+  kibana-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+
+networks:
+  iib-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

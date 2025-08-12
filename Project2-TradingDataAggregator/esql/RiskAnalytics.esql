@@ -1,0 +1,377 @@
+-- Risk Analytics Module for Trading Data
+-- Calculates various risk metrics and portfolio analytics
+
+CREATE COMPUTE MODULE RiskAnalytics
+    CREATE FUNCTION Main() RETURNS BOOLEAN
+    BEGIN
+        -- Extract input data
+        DECLARE symbol CHARACTER DEFAULT InputRoot.JSON.Data.instrument.symbol;
+        DECLARE currentPrice DECIMAL DEFAULT InputRoot.JSON.Data.marketData.price;
+        DECLARE position DECIMAL DEFAULT InputRoot.JSON.Data.portfolio.position;
+        DECLARE portfolioValue DECIMAL DEFAULT InputRoot.JSON.Data.portfolio.totalValue;
+        
+        -- Initialize risk metrics structure
+        DECLARE riskMetrics ROW;
+        
+        -- Get historical data for risk calculations
+        DECLARE priceHistory DECIMAL ARRAY;
+        DECLARE returns DECIMAL ARRAY;
+        SET priceHistory = GetPriceHistory(symbol, 252); -- 1 year of daily data
+        SET returns = CalculateReturns(priceHistory);
+        
+        -- Calculate Value at Risk (VaR)
+        SET riskMetrics.var95 = CalculateVaR(returns, 0.95, position, currentPrice);
+        SET riskMetrics.var99 = CalculateVaR(returns, 0.99, position, currentPrice);
+        
+        -- Calculate Expected Shortfall (Conditional VaR)
+        SET riskMetrics.expectedShortfall95 = CalculateExpectedShortfall(returns, 0.95, position, currentPrice);
+        SET riskMetrics.expectedShortfall99 = CalculateExpectedShortfall(returns, 0.99, position, currentPrice);
+        
+        -- Calculate Volatility metrics
+        SET riskMetrics.volatility = CalculateVolatility(returns);
+        SET riskMetrics.annualizedVolatility = riskMetrics.volatility * SQRT(252);
+        
+        -- Calculate Sharpe Ratio (assuming risk-free rate of 2%)
+        DECLARE riskFreeRate DECIMAL DEFAULT 0.02;
+        DECLARE avgReturn DECIMAL DEFAULT CalculateAverageReturn(returns);
+        SET riskMetrics.sharpeRatio = (avgReturn * 252 - riskFreeRate) / riskMetrics.annualizedVolatility;
+        
+        -- Calculate Maximum Drawdown
+        SET riskMetrics.maxDrawdown = CalculateMaxDrawdown(priceHistory);
+        
+        -- Calculate Beta (systematic risk) - using SPY as market proxy
+        DECLARE marketReturns DECIMAL ARRAY;
+        SET marketReturns = GetMarketReturns(252);
+        SET riskMetrics.beta = CalculateBeta(returns, marketReturns);
+        
+        -- Calculate position-specific risk
+        DECLARE positionValue DECIMAL DEFAULT position * currentPrice;
+        SET riskMetrics.positionConcentration = positionValue / portfolioValue;
+        
+        -- Risk alerts based on thresholds
+        DECLARE alerts ROW;
+        SET alerts = GenerateRiskAlerts(riskMetrics, positionValue, portfolioValue);
+        
+        -- Stress testing scenarios
+        DECLARE stressTests ROW;
+        SET stressTests = PerformStressTests(currentPrice, position, riskMetrics.volatility);
+        
+        -- Build output message
+        SET OutputRoot = InputRoot;
+        SET OutputRoot.JSON.Data.riskAnalysis.metrics = riskMetrics;
+        SET OutputRoot.JSON.Data.riskAnalysis.alerts = alerts;
+        SET OutputRoot.JSON.Data.riskAnalysis.stressTests = stressTests;
+        SET OutputRoot.JSON.Data.riskAnalysis.calculatedAt = CURRENT_TIMESTAMP;
+        SET OutputRoot.JSON.Data.riskAnalysis.version = '1.0';
+        
+        RETURN TRUE;
+    END;
+    
+    -- Calculate returns from price series
+    CREATE FUNCTION CalculateReturns(IN prices DECIMAL ARRAY) 
+        RETURNS DECIMAL ARRAY
+    BEGIN
+        DECLARE returns DECIMAL ARRAY;
+        DECLARE i INTEGER DEFAULT 2;
+        
+        WHILE i <= CARDINALITY(prices) DO
+            SET returns[i-1] = (prices[i] - prices[i-1]) / prices[i-1];
+            SET i = i + 1;
+        END WHILE;
+        
+        RETURN returns;
+    END;
+    
+    -- Calculate Value at Risk using Historical Simulation method
+    CREATE FUNCTION CalculateVaR(IN returns DECIMAL ARRAY, IN confidence DECIMAL, IN position DECIMAL, IN currentPrice DECIMAL) 
+        RETURNS DECIMAL
+    BEGIN
+        -- Sort returns in ascending order (worst to best)
+        DECLARE sortedReturns DECIMAL ARRAY;
+        SET sortedReturns = SortArray(returns);
+        
+        -- Find percentile based on confidence level
+        DECLARE percentileIndex INTEGER DEFAULT CAST((1 - confidence) * CARDINALITY(sortedReturns) AS INTEGER);
+        IF percentileIndex < 1 THEN
+            SET percentileIndex = 1;
+        END IF;
+        
+        DECLARE percentileReturn DECIMAL DEFAULT sortedReturns[percentileIndex];
+        DECLARE positionValue DECIMAL DEFAULT position * currentPrice;
+        
+        -- VaR is the potential loss at the given confidence level
+        RETURN ABS(percentileReturn * positionValue);
+    END;
+    
+    -- Calculate Expected Shortfall (average loss beyond VaR)
+    CREATE FUNCTION CalculateExpectedShortfall(IN returns DECIMAL ARRAY, IN confidence DECIMAL, IN position DECIMAL, IN currentPrice DECIMAL) 
+        RETURNS DECIMAL
+    BEGIN
+        DECLARE sortedReturns DECIMAL ARRAY;
+        SET sortedReturns = SortArray(returns);
+        
+        DECLARE percentileIndex INTEGER DEFAULT CAST((1 - confidence) * CARDINALITY(sortedReturns) AS INTEGER);
+        IF percentileIndex < 1 THEN
+            SET percentileIndex = 1;
+        END IF;
+        
+        -- Average of returns worse than VaR threshold
+        DECLARE sum DECIMAL DEFAULT 0;
+        DECLARE count INTEGER DEFAULT 0;
+        DECLARE i INTEGER DEFAULT 1;
+        
+        WHILE i <= percentileIndex DO
+            SET sum = sum + sortedReturns[i];
+            SET count = count + 1;
+            SET i = i + 1;
+        END WHILE;
+        
+        DECLARE avgTailReturn DECIMAL DEFAULT sum / count;
+        DECLARE positionValue DECIMAL DEFAULT position * currentPrice;
+        
+        RETURN ABS(avgTailReturn * positionValue);
+    END;
+    
+    -- Calculate historical volatility
+    CREATE FUNCTION CalculateVolatility(IN returns DECIMAL ARRAY) 
+        RETURNS DECIMAL
+    BEGIN
+        DECLARE mean DECIMAL DEFAULT CalculateAverageReturn(returns);
+        DECLARE sumSquaredDeviations DECIMAL DEFAULT 0;
+        DECLARE i INTEGER DEFAULT 1;
+        
+        WHILE i <= CARDINALITY(returns) DO
+            DECLARE deviation DECIMAL DEFAULT returns[i] - mean;
+            SET sumSquaredDeviations = sumSquaredDeviations + (deviation * deviation);
+            SET i = i + 1;
+        END WHILE;
+        
+        DECLARE variance DECIMAL DEFAULT sumSquaredDeviations / (CARDINALITY(returns) - 1);
+        RETURN SQRT(variance);
+    END;
+    
+    -- Calculate average return
+    CREATE FUNCTION CalculateAverageReturn(IN returns DECIMAL ARRAY) 
+        RETURNS DECIMAL
+    BEGIN
+        DECLARE sum DECIMAL DEFAULT 0;
+        DECLARE i INTEGER DEFAULT 1;
+        
+        WHILE i <= CARDINALITY(returns) DO
+            SET sum = sum + returns[i];
+            SET i = i + 1;
+        END WHILE;
+        
+        RETURN sum / CARDINALITY(returns);
+    END;
+    
+    -- Calculate Maximum Drawdown
+    CREATE FUNCTION CalculateMaxDrawdown(IN prices DECIMAL ARRAY) 
+        RETURNS DECIMAL
+    BEGIN
+        DECLARE maxDrawdown DECIMAL DEFAULT 0;
+        DECLARE peak DECIMAL DEFAULT prices[1];
+        DECLARE i INTEGER DEFAULT 2;
+        
+        WHILE i <= CARDINALITY(prices) DO
+            IF prices[i] > peak THEN
+                SET peak = prices[i];
+            ELSE
+                DECLARE drawdown DECIMAL DEFAULT (peak - prices[i]) / peak;
+                IF drawdown > maxDrawdown THEN
+                    SET maxDrawdown = drawdown;
+                END IF;
+            END IF;
+            SET i = i + 1;
+        END WHILE;
+        
+        RETURN maxDrawdown;
+    END;
+    
+    -- Calculate Beta (correlation with market)
+    CREATE FUNCTION CalculateBeta(IN assetReturns DECIMAL ARRAY, IN marketReturns DECIMAL ARRAY) 
+        RETURNS DECIMAL
+    BEGIN
+        DECLARE assetMean DECIMAL DEFAULT CalculateAverageReturn(assetReturns);
+        DECLARE marketMean DECIMAL DEFAULT CalculateAverageReturn(marketReturns);
+        DECLARE covariance DECIMAL DEFAULT 0;
+        DECLARE marketVariance DECIMAL DEFAULT 0;
+        DECLARE i INTEGER DEFAULT 1;
+        
+        -- Calculate covariance and market variance
+        WHILE i <= CARDINALITY(assetReturns) AND i <= CARDINALITY(marketReturns) DO
+            DECLARE assetDev DECIMAL DEFAULT assetReturns[i] - assetMean;
+            DECLARE marketDev DECIMAL DEFAULT marketReturns[i] - marketMean;
+            
+            SET covariance = covariance + (assetDev * marketDev);
+            SET marketVariance = marketVariance + (marketDev * marketDev);
+            SET i = i + 1;
+        END WHILE;
+        
+        DECLARE n INTEGER DEFAULT LEAST(CARDINALITY(assetReturns), CARDINALITY(marketReturns)) - 1;
+        SET covariance = covariance / n;
+        SET marketVariance = marketVariance / n;
+        
+        IF marketVariance = 0 THEN
+            RETURN 0;
+        END IF;
+        
+        RETURN covariance / marketVariance;
+    END;
+    
+    -- Generate risk alerts based on thresholds
+    CREATE FUNCTION GenerateRiskAlerts(IN metrics ROW, IN positionValue DECIMAL, IN portfolioValue DECIMAL) 
+        RETURNS ROW
+    BEGIN
+        DECLARE alerts ROW;
+        DECLARE alertList CHARACTER ARRAY;
+        DECLARE alertCount INTEGER DEFAULT 0;
+        
+        -- VaR threshold alerts
+        IF metrics.var95 > portfolioValue * 0.05 THEN -- 5% of portfolio
+            SET alertCount = alertCount + 1;
+            SET alertList[alertCount] = 'HIGH_VAR_95: VaR exceeds 5% of portfolio value';
+        END IF;
+        
+        -- Concentration risk alert
+        IF metrics.positionConcentration > 0.10 THEN -- 10% concentration
+            SET alertCount = alertCount + 1;
+            SET alertList[alertCount] = 'HIGH_CONCENTRATION: Position exceeds 10% of portfolio';
+        END IF;
+        
+        -- Volatility alert
+        IF metrics.annualizedVolatility > 0.30 THEN -- 30% annual volatility
+            SET alertCount = alertCount + 1;
+            SET alertList[alertCount] = 'HIGH_VOLATILITY: Annual volatility exceeds 30%';
+        END IF;
+        
+        -- Sharpe ratio alert
+        IF metrics.sharpeRatio < 0.5 THEN
+            SET alertCount = alertCount + 1;
+            SET alertList[alertCount] = 'LOW_SHARPE: Sharpe ratio below 0.5';
+        END IF;
+        
+        -- Maximum drawdown alert
+        IF metrics.maxDrawdown > 0.20 THEN -- 20% drawdown
+            SET alertCount = alertCount + 1;
+            SET alertList[alertCount] = 'HIGH_DRAWDOWN: Maximum drawdown exceeds 20%';
+        END IF;
+        
+        SET alerts.count = alertCount;
+        SET alerts.alerts = alertList;
+        SET alerts.severity = CASE
+            WHEN alertCount >= 3 THEN 'HIGH'
+            WHEN alertCount = 2 THEN 'MEDIUM'
+            WHEN alertCount = 1 THEN 'LOW'
+            ELSE 'NONE'
+        END;
+        
+        RETURN alerts;
+    END;
+    
+    -- Perform stress testing scenarios
+    CREATE FUNCTION PerformStressTests(IN currentPrice DECIMAL, IN position DECIMAL, IN volatility DECIMAL) 
+        RETURNS ROW
+    BEGIN
+        DECLARE stressTests ROW;
+        DECLARE positionValue DECIMAL DEFAULT position * currentPrice;
+        
+        -- Market crash scenario (-20% price movement)
+        DECLARE crashScenario DECIMAL DEFAULT currentPrice * 0.8;
+        SET stressTests.marketCrash = (crashScenario - currentPrice) * position;
+        
+        -- High volatility scenario (3 standard deviations)
+        DECLARE highVolScenario DECIMAL DEFAULT currentPrice * (1 - 3 * volatility);
+        SET stressTests.highVolatility = (highVolScenario - currentPrice) * position;
+        
+        -- Interest rate shock (correlates with financial sector)
+        DECLARE interestRateShock DECIMAL DEFAULT currentPrice * 0.9; -- Assume 10% drop
+        SET stressTests.interestRateShock = (interestRateShock - currentPrice) * position;
+        
+        -- Liquidity crisis scenario (wider bid-ask spreads)
+        DECLARE liquidityCrisis DECIMAL DEFAULT currentPrice * 0.95; -- 5% haircut
+        SET stressTests.liquidityCrisis = (liquidityCrisis - currentPrice) * position;
+        
+        -- Summary
+        SET stressTests.worstCase = LEAST(
+            stressTests.marketCrash,
+            stressTests.highVolatility,
+            stressTests.interestRateShock,
+            stressTests.liquidityCrisis
+        );
+        
+        RETURN stressTests;
+    END;
+    
+    -- Helper function to sort array (simplified bubble sort)
+    CREATE FUNCTION SortArray(IN inputArray DECIMAL ARRAY) 
+        RETURNS DECIMAL ARRAY
+    BEGIN
+        DECLARE sortedArray DECIMAL ARRAY;
+        DECLARE n INTEGER DEFAULT CARDINALITY(inputArray);
+        DECLARE i, j INTEGER;
+        
+        -- Copy input array
+        SET i = 1;
+        WHILE i <= n DO
+            SET sortedArray[i] = inputArray[i];
+            SET i = i + 1;
+        END WHILE;
+        
+        -- Bubble sort (ascending order)
+        SET i = 1;
+        WHILE i <= n - 1 DO
+            SET j = 1;
+            WHILE j <= n - i DO
+                IF sortedArray[j] > sortedArray[j + 1] THEN
+                    DECLARE temp DECIMAL DEFAULT sortedArray[j];
+                    SET sortedArray[j] = sortedArray[j + 1];
+                    SET sortedArray[j + 1] = temp;
+                END IF;
+                SET j = j + 1;
+            END WHILE;
+            SET i = i + 1;
+        END WHILE;
+        
+        RETURN sortedArray;
+    END;
+    
+    -- Helper function to get market returns (simulated)
+    CREATE FUNCTION GetMarketReturns(IN periods INTEGER) 
+        RETURNS DECIMAL ARRAY
+    BEGIN
+        -- In real implementation, this would fetch S&P 500 or other market index returns
+        DECLARE marketReturns DECIMAL ARRAY;
+        DECLARE i INTEGER DEFAULT 1;
+        
+        WHILE i <= periods DO
+            -- Simulate market returns with mean of 0.04% daily and volatility of 1.2%
+            SET marketReturns[i] = 0.0004 + (RANDOM() - 0.5) * 0.024;
+            SET i = i + 1;
+        END WHILE;
+        
+        RETURN marketReturns;
+    END;
+    
+    -- Helper function to get historical prices (simulated)
+    CREATE FUNCTION GetPriceHistory(IN symbol CHARACTER, IN periods INTEGER) 
+        RETURNS DECIMAL ARRAY
+    BEGIN
+        -- Simulated price history with realistic movements
+        DECLARE prices DECIMAL ARRAY;
+        DECLARE basePrice DECIMAL DEFAULT 100.0;
+        DECLARE i INTEGER DEFAULT 1;
+        
+        SET prices[1] = basePrice;
+        
+        WHILE i < periods DO
+            -- Simulate daily price movements with drift and volatility
+            DECLARE return DECIMAL DEFAULT 0.0002 + (RANDOM() - 0.5) * 0.02; -- 2% daily volatility
+            SET prices[i + 1] = prices[i] * (1 + return);
+            SET i = i + 1;
+        END WHILE;
+        
+        RETURN prices;
+    END;
+    
+END MODULE;

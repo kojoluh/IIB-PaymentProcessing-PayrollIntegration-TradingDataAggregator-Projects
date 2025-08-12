@@ -1,0 +1,195 @@
+-- Common Utilities for IIB ESB Financial Applications
+-- Shared functions used across both payment processing and trading data projects
+
+CREATE COMPUTE MODULE CommonUtils
+    
+    -- Generate unique transaction ID
+    CREATE FUNCTION GenerateTransactionId() RETURNS CHARACTER
+    BEGIN
+        DECLARE timestamp CHARACTER DEFAULT CAST(CURRENT_TIMESTAMP AS CHARACTER);
+        DECLARE randomComponent INTEGER DEFAULT CAST(RANDOM() * 1000000 AS INTEGER);
+        
+        -- Format: YYYYMMDD-HHMMSS-XXXXXX
+        RETURN REPLACE(SUBSTRING(timestamp FROM 1 FOR 19), ':', '') || '-' || CAST(randomComponent AS CHARACTER);
+    END;
+    
+    -- Format currency amount with proper precision
+    CREATE FUNCTION FormatCurrencyAmount(IN amount DECIMAL, IN currency CHARACTER) RETURNS CHARACTER
+    BEGIN
+        DECLARE precision INTEGER;
+        
+        -- Set precision based on currency
+        CASE currency
+            WHEN 'JPY', 'NGN' THEN SET precision = 0; -- No decimal places for these currencies
+            ELSE SET precision = 2; -- Standard 2 decimal places
+        END CASE;
+        
+        RETURN currency || ' ' || CAST(ROUND(amount, precision) AS CHARACTER);
+    END;
+    
+    -- Validate ISO currency code
+    CREATE FUNCTION IsValidCurrency(IN currency CHARACTER) RETURNS BOOLEAN
+    BEGIN
+        DECLARE validCurrencies CHARACTER ARRAY;
+        SET validCurrencies = LIST{
+            'GHS', 'USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'CHF', 'CNY', 'INR', 'BRL',
+            'RUB', 'SGD', 'HKD', 'NOK', 'SEK', 'DKK', 'PLN', 'CZK', 'HUF', 'RON'
+        };
+        
+        DECLARE i INTEGER DEFAULT 1;
+        WHILE i <= CARDINALITY(validCurrencies) DO
+            IF currency = validCurrencies[i] THEN
+                RETURN TRUE;
+            END IF;
+            SET i = i + 1;
+        END WHILE;
+        
+        RETURN FALSE;
+    END;
+    
+    -- Calculate business days between two dates
+    CREATE FUNCTION CalculateBusinessDays(IN startDate DATE, IN endDate DATE) RETURNS INTEGER
+    BEGIN
+        DECLARE businessDays INTEGER DEFAULT 0;
+        DECLARE currentDate DATE DEFAULT startDate;
+        
+        WHILE currentDate <= endDate DO
+            DECLARE dayOfWeek INTEGER DEFAULT DAYOFWEEK(currentDate);
+            -- Skip weekends (Sunday = 1, Saturday = 7)
+            IF dayOfWeek > 1 AND dayOfWeek < 7 THEN
+                SET businessDays = businessDays + 1;
+            END IF;
+            SET currentDate = currentDate + INTERVAL '1' DAY;
+        END WHILE;
+        
+        RETURN businessDays;
+    END;
+    
+    -- Hash sensitive data (simplified)
+    CREATE FUNCTION HashSensitiveData(IN data CHARACTER) RETURNS CHARACTER
+    BEGIN
+        -- In production, use proper cryptographic hashing
+        -- This is a simplified example
+        DECLARE hash CHARACTER;
+        DECLARE i INTEGER DEFAULT 1;
+        DECLARE hashValue INTEGER DEFAULT 0;
+        
+        WHILE i <= LENGTH(data) DO
+            SET hashValue = hashValue + ASCII(SUBSTRING(data FROM i FOR 1)) * i;
+            SET i = i + 1;
+        END WHILE;
+        
+        SET hash = 'HASH_' || CAST(ABS(hashValue) AS CHARACTER);
+        RETURN hash;
+    END;
+    
+    -- Log message with timestamp and level
+    CREATE PROCEDURE LogMessage(IN level CHARACTER, IN module CHARACTER, IN message CHARACTER, IN correlationId CHARACTER)
+    BEGIN
+        -- In production, this would write to proper logging system
+        DECLARE logEntry CHARACTER;
+        SET logEntry = CAST(CURRENT_TIMESTAMP AS CHARACTER) || ' [' || level || '] ' || 
+                      module || ' - ' || message || ' (ID: ' || correlationId || ')';
+        
+        -- For demonstration, we'll set it in a global variable or message header
+        -- In real implementation, use appropriate logging framework
+    END;
+    
+    -- Validate email address format
+    CREATE FUNCTION IsValidEmail(IN email CHARACTER) RETURNS BOOLEAN
+    BEGIN
+        -- Simple email validation - in production use more robust validation
+        IF email LIKE '%@%.%' AND LENGTH(email) > 5 THEN
+            RETURN TRUE;
+        ELSE
+            RETURN FALSE;
+        END IF;
+    END;
+    
+    -- Mask credit card number for logging/display
+    CREATE FUNCTION MaskCreditCardNumber(IN cardNumber CHARACTER) RETURNS CHARACTER
+    BEGIN
+        IF LENGTH(cardNumber) < 8 THEN
+            RETURN '****';
+        END IF;
+        
+        RETURN SUBSTRING(cardNumber FROM 1 FOR 4) || '****' || SUBSTRING(cardNumber FROM -4);
+    END;
+    
+    -- Convert timestamp to different timezone
+    CREATE FUNCTION ConvertTimezone(IN timestamp TIMESTAMP, IN fromTz CHARACTER, IN toTz CHARACTER) RETURNS TIMESTAMP
+    BEGIN
+        -- Simplified timezone conversion - in production use proper timezone libraries
+        DECLARE offsetHours INTEGER DEFAULT 0;
+        
+        -- Basic timezone offset mapping
+        IF fromTz = 'UTC' AND toTz = 'EST' THEN
+            SET offsetHours = -5;
+        ELSEIF fromTz = 'UTC' AND toTz = 'PST' THEN
+            SET offsetHours = -8;
+        ELSEIF fromTz = 'EST' AND toTz = 'UTC' THEN
+            SET offsetHours = 5;
+        END IF;
+        
+        RETURN timestamp + CAST(offsetHours AS INTERVAL HOUR);
+    END;
+    
+    -- Generate correlation ID for tracing
+    CREATE FUNCTION GenerateCorrelationId(IN prefix CHARACTER) RETURNS CHARACTER
+    BEGIN
+        DECLARE timestamp CHARACTER DEFAULT REPLACE(CAST(CURRENT_TIMESTAMP AS CHARACTER), ':', '');
+        DECLARE random CHARACTER DEFAULT CAST(CAST(RANDOM() * 1000000 AS INTEGER) AS CHARACTER);
+        
+        RETURN prefix || '-' || SUBSTRING(timestamp FROM 1 FOR 14) || '-' || random;
+    END;
+    
+    -- Calculate percentage change
+    CREATE FUNCTION CalculatePercentageChange(IN oldValue DECIMAL, IN newValue DECIMAL) RETURNS DECIMAL
+    BEGIN
+        IF oldValue = 0 THEN
+            RETURN 0;
+        END IF;
+        
+        RETURN ((newValue - oldValue) / oldValue) * 100;
+    END;
+    
+    -- Check if market is open (simplified)
+    CREATE FUNCTION IsMarketOpen(IN exchangeCode CHARACTER, IN checkTime TIMESTAMP) RETURNS BOOLEAN
+    BEGIN
+        DECLARE hour INTEGER DEFAULT EXTRACT(HOUR FROM checkTime);
+        DECLARE dayOfWeek INTEGER DEFAULT DAYOFWEEK(DATE(checkTime));
+        
+        -- Skip weekends
+        IF dayOfWeek = 1 OR dayOfWeek = 7 THEN -- Sunday or Saturday
+            RETURN FALSE;
+        END IF;
+        
+        -- Basic market hours check
+        CASE exchangeCode
+            WHEN 'NYSE', 'NASDAQ' THEN
+                RETURN hour >= 9 AND hour < 16; -- 9 AM to 4 PM EST
+            WHEN 'LSE' THEN
+                RETURN hour >= 8 AND hour < 16; -- 8 AM to 4 PM GMT
+            WHEN 'TSE' THEN
+                RETURN hour >= 9 AND hour < 15; -- 9 AM to 3 PM JST
+            ELSE
+                RETURN TRUE; -- Default to open for unknown exchanges
+        END CASE;
+    END;
+    
+    -- Round to nearest tick size
+    CREATE FUNCTION RoundToTickSize(IN price DECIMAL, IN tickSize DECIMAL) RETURNS DECIMAL
+    BEGIN
+        IF tickSize <= 0 THEN
+            RETURN price;
+        END IF;
+        
+        RETURN ROUND(price / tickSize) * tickSize;
+    END;
+    
+END MODULE;
+
+-- host request to service and retrieve data for enrichment from Server
+-- OutputRoot vs InputRoot
+-- OutputRoot.JSON.Data vs InputRoot.JSON.Data
+-- take note of the syntax and versioning issues 

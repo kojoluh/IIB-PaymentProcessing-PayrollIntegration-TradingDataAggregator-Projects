@@ -1,0 +1,95 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MessageFlow>
+    <eClassVersion>12.3.0</eClassVersion>
+    <nodes>
+        <!-- Input Nodes -->
+        <node xmi:type="HTTPInput" xmi:id="HTTPInput" location="50,100">
+            <URLSpecifier>/api/payments/process</URLSpecifier>
+            <MessageDomain>JSON</MessageDomain>
+        </node>
+        
+        <node xmi:type="MQInput" xmi:id="MQInput" location="50,200">
+            <queueName>PAYMENT.IN</queueName>
+            <MessageDomain>JSON</MessageDomain>
+        </node>
+        
+        <!-- Processing Nodes -->
+        <node xmi:type="Compute" xmi:id="PaymentValidation" location="200,100">
+            <computeExpression>esql://PaymentValidator#PaymentValidator.Main</computeExpression>
+        </node>
+        
+        <node xmi:type="Route" xmi:id="ValidationRoute" location="350,100">
+            <routingExpression>InputRoot.JSON.Data.validation.isValid</routingExpression>
+        </node>
+        
+        <node xmi:type="Compute" xmi:id="FraudDetection" location="500,60">
+            <computeExpression>esql://FraudDetector#FraudDetector.Main</computeExpression>
+        </node>
+        
+        <node xmi:type="Route" xmi:id="FraudRoute" location="650,60">
+            <routingExpression>InputRoot.JSON.Data.fraudAnalysis.status</routingExpression>
+        </node>
+        
+        <node xmi:type="Compute" xmi:id="GatewayProcessing" location="800,40">
+            <computeExpression>esql://PaymentGatewayIntegration#PaymentGatewayIntegration.Main</computeExpression>
+        </node>
+        
+        <node xmi:type="Database" xmi:id="AuditLog" location="950,40">
+            <dataSourceName>PaymentDB</dataSourceName>
+            <statement>INSERT INTO audit_log (transaction_id, amount, status, timestamp) VALUES (?, ?, ?, ?)</statement>
+        </node>
+        
+        <!-- Error Handling -->
+        <node xmi:type="Compute" xmi:id="ValidationError" location="500,140">
+            <computeExpression>esql://ErrorHandler#ErrorHandler.ValidationError</computeExpression>
+        </node>
+        
+        <node xmi:type="Compute" xmi:id="FraudError" location="800,100">
+            <computeExpression>esql://ErrorHandler#ErrorHandler.FraudError</computeExpression>
+        </node>
+        
+        <!-- Output Nodes -->
+        <node xmi:type="HTTPReply" xmi:id="HTTPReply" location="1100,40">
+            <ResponseCode>200</ResponseCode>
+        </node>
+        
+        <node xmi:type="MQOutput" xmi:id="MQOutput" location="1100,100">
+            <queueName>PAYMENT.OUT</queueName>
+        </node>
+        
+        <node xmi:type="HTTPReply" xmi:id="ErrorReply" location="650,140">
+            <ResponseCode>400</ResponseCode>
+        </node>
+    </nodes>
+    
+    <!-- Connections -->
+    <connections>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_1" sourceNode="HTTPInput" targetNode="PaymentValidation"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_2" sourceNode="MQInput" targetNode="PaymentValidation"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_3" sourceNode="PaymentValidation" targetNode="ValidationRoute"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_4" sourceNode="ValidationRoute" targetNode="FraudDetection" sourceTerminal="out" targetTerminal="in">
+            <routingOutputTerminal terminal="true" filterExpression="true"/>
+        </connection>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_5" sourceNode="ValidationRoute" targetNode="ValidationError" sourceTerminal="out" targetTerminal="in">
+            <routingOutputTerminal terminal="false" filterExpression="false"/>
+        </connection>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_6" sourceNode="FraudDetection" targetNode="FraudRoute"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_7" sourceNode="FraudRoute" targetNode="GatewayProcessing" sourceTerminal="out" targetTerminal="in">
+            <routingOutputTerminal terminal="APPROVED" filterExpression="'APPROVED'"/>
+        </connection>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_8" sourceNode="FraudRoute" targetNode="FraudError" sourceTerminal="out" targetTerminal="in">
+            <routingOutputTerminal terminal="HIGH_RISK" filterExpression="'HIGH_RISK'"/>
+        </connection>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_9" sourceNode="GatewayProcessing" targetNode="AuditLog"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_10" sourceNode="AuditLog" targetNode="HTTPReply"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_11" sourceNode="AuditLog" targetNode="MQOutput"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_12" sourceNode="ValidationError" targetNode="ErrorReply"/>
+        <connection xmi:type="eflow:FCMConnection" xmi:id="FCMConnection_13" sourceNode="FraudError" targetNode="ErrorReply"/>
+    </connections>
+    
+    <!-- Properties -->
+    <properties>
+        <property name="shortDescription" value="Payment Processing Message Flow"/>
+        <property name="longDescription" value="Processes payment transactions with validation, fraud detection, and gateway integration"/>
+    </properties>
+</MessageFlow>

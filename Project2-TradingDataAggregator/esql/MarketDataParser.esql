@@ -1,0 +1,154 @@
+-- Market Data Parser for Trading Data Aggregation
+-- Parses binary market data feeds from exchanges
+
+CREATE COMPUTE MODULE MarketDataParser
+    CREATE FUNCTION Main() RETURNS BOOLEAN
+    BEGIN
+        -- Declare variables for market data parsing
+        DECLARE inputData BLOB;
+        DECLARE messageType CHARACTER;
+        DECLARE symbol CHARACTER;
+        DECLARE price DECIMAL;
+        DECLARE volume INTEGER;
+        DECLARE timestamp TIMESTAMP;
+        DECLARE exchangeId CHARACTER;
+        
+        -- Get input data (assuming binary market data feed)
+        SET inputData = InputRoot.BLOB.BLOB;
+        
+        -- Parse message type (first byte determines message structure)
+        DECLARE messageTypeByte INTEGER DEFAULT CAST(SUBSTRING(inputData FROM 1 FOR 1) AS INTEGER);
+        
+        IF messageTypeByte = 1 THEN
+            SET messageType = 'TRADE';
+            CALL ParseTradeMessage(inputData, symbol, price, volume, timestamp, exchangeId);
+        ELSEIF messageTypeByte = 2 THEN
+            SET messageType = 'QUOTE';
+            CALL ParseQuoteMessage(inputData, symbol, price, volume, timestamp, exchangeId);
+        ELSEIF messageTypeByte = 3 THEN
+            SET messageType = 'ORDER_BOOK';
+            CALL ParseOrderBookMessage(inputData, symbol, price, volume, timestamp, exchangeId);
+        ELSE
+            SET messageType = 'UNKNOWN';
+            -- Log unknown message type and return
+            RETURN TRUE;
+        END IF;
+        
+        -- Create normalized output message
+        SET OutputRoot.JSON.Data.messageType = messageType;
+        SET OutputRoot.JSON.Data.instrument.symbol = symbol;
+        SET OutputRoot.JSON.Data.instrument.exchange = exchangeId;
+        SET OutputRoot.JSON.Data.marketData.price = price;
+        SET OutputRoot.JSON.Data.marketData.volume = volume;
+        SET OutputRoot.JSON.Data.marketData.timestamp = timestamp;
+        SET OutputRoot.JSON.Data.processing.receivedAt = CURRENT_TIMESTAMP;
+        SET OutputRoot.JSON.Data.processing.parsedBy = 'MarketDataParser';
+        SET OutputRoot.JSON.Data.processing.version = '1.0';
+        
+        -- Add technical indicators calculation trigger
+        SET OutputRoot.JSON.Data.requiresAnalysis = TRUE;
+        
+        RETURN TRUE;
+    END;
+    
+    -- Parse trade execution messages
+    CREATE PROCEDURE ParseTradeMessage(
+        IN inputData BLOB,
+        OUT symbol CHARACTER,
+        OUT price DECIMAL,
+        OUT volume INTEGER,
+        OUT timestamp TIMESTAMP,
+        OUT exchangeId CHARACTER
+    )
+    BEGIN
+        -- Trade message format: [Type(1)] [Symbol(8)] [Price(8)] [Volume(4)] [Timestamp(8)] [Exchange(4)]
+        
+        -- Extract symbol (bytes 2-9, padded with spaces)
+        SET symbol = TRIM(CAST(SUBSTRING(inputData FROM 2 FOR 8) AS CHARACTER));
+        
+        -- Extract price (bytes 10-17, scaled by 10000)
+        DECLARE rawPrice INTEGER DEFAULT CAST(SUBSTRING(inputData FROM 10 FOR 8) AS INTEGER);
+        SET price = rawPrice / 10000.0;
+        
+        -- Extract volume (bytes 18-21)
+        SET volume = CAST(SUBSTRING(inputData FROM 18 FOR 4) AS INTEGER);
+        
+        -- Extract timestamp (bytes 22-29, Unix timestamp)
+        DECLARE unixTimestamp INTEGER DEFAULT CAST(SUBSTRING(inputData FROM 22 FOR 8) AS INTEGER);
+        SET timestamp = TIMESTAMP '1970-01-01 00:00:00' + CAST(unixTimestamp AS INTERVAL SECOND);
+        
+        -- Extract exchange ID (bytes 30-33)
+        DECLARE exchangeCode INTEGER DEFAULT CAST(SUBSTRING(inputData FROM 30 FOR 4) AS INTEGER);
+        SET exchangeId = GetExchangeName(exchangeCode);
+    END;
+    
+    -- Parse quote (bid/ask) messages
+    CREATE PROCEDURE ParseQuoteMessage(
+        IN inputData BLOB,
+        OUT symbol CHARACTER,
+        OUT price DECIMAL,
+        OUT volume INTEGER,
+        OUT timestamp TIMESTAMP,
+        OUT exchangeId CHARACTER
+    )
+    BEGIN
+        -- Quote message format: [Type(1)] [Symbol(8)] [BidPrice(8)] [AskPrice(8)] [Volume(4)] [Timestamp(8)] [Exchange(4)]
+        
+        SET symbol = TRIM(CAST(SUBSTRING(inputData FROM 2 FOR 8) AS CHARACTER));
+        
+        -- For quotes, we'll use the mid price (average of bid and ask)
+        DECLARE bidPrice DECIMAL DEFAULT CAST(SUBSTRING(inputData FROM 10 FOR 8) AS INTEGER) / 10000.0;
+        DECLARE askPrice DECIMAL DEFAULT CAST(SUBSTRING(inputData FROM 18 FOR 8) AS INTEGER) / 10000.0;
+        SET price = (bidPrice + askPrice) / 2.0;
+        
+        SET volume = CAST(SUBSTRING(inputData FROM 26 FOR 4) AS INTEGER);
+        
+        DECLARE unixTimestamp INTEGER DEFAULT CAST(SUBSTRING(inputData FROM 30 FOR 8) AS INTEGER);
+        SET timestamp = TIMESTAMP '1970-01-01 00:00:00' + CAST(unixTimestamp AS INTERVAL SECOND);
+        
+        DECLARE exchangeCode INTEGER DEFAULT CAST(SUBSTRING(inputData FROM 38 FOR 4) AS INTEGER);
+        SET exchangeId = GetExchangeName(exchangeCode);
+    END;
+    
+    -- Parse order book messages
+    CREATE PROCEDURE ParseOrderBookMessage(
+        IN inputData BLOB,
+        OUT symbol CHARACTER,
+        OUT price DECIMAL,
+        OUT volume INTEGER,
+        OUT timestamp TIMESTAMP,
+        OUT exchangeId CHARACTER
+    )
+    BEGIN
+        -- Order book message format: [Type(1)] [Symbol(8)] [Levels...] [Timestamp(8)] [Exchange(4)]
+        -- Simplified to extract top of book
+        
+        SET symbol = TRIM(CAST(SUBSTRING(inputData FROM 2 FOR 8) AS CHARACTER));
+        
+        -- Extract best bid price (first level)
+        SET price = CAST(SUBSTRING(inputData FROM 10 FOR 8) AS INTEGER) / 10000.0;
+        SET volume = CAST(SUBSTRING(inputData FROM 18 FOR 4) AS INTEGER);
+        
+        -- Timestamp at end of message
+        DECLARE timestampOffset INTEGER DEFAULT LENGTH(inputData) - 12;
+        DECLARE unixTimestamp INTEGER DEFAULT CAST(SUBSTRING(inputData FROM timestampOffset FOR 8) AS INTEGER);
+        SET timestamp = TIMESTAMP '1970-01-01 00:00:00' + CAST(unixTimestamp AS INTERVAL SECOND);
+        
+        DECLARE exchangeCode INTEGER DEFAULT CAST(SUBSTRING(inputData FROM timestampOffset + 8 FOR 4) AS INTEGER);
+        SET exchangeId = GetExchangeName(exchangeCode);
+    END;
+    
+    -- Helper function to convert exchange code to name
+    CREATE FUNCTION GetExchangeName(IN exchangeCode INTEGER) RETURNS CHARACTER
+    BEGIN
+        CASE exchangeCode
+            WHEN 1 THEN RETURN 'NYSE';
+            WHEN 2 THEN RETURN 'NASDAQ';
+            WHEN 3 THEN RETURN 'LSE';
+            WHEN 4 THEN RETURN 'EURONEXT';
+            WHEN 5 THEN RETURN 'CME';
+            ELSE RETURN 'UNKNOWN';
+        END CASE;
+    END;
+    
+END MODULE;

@@ -1,0 +1,124 @@
+-- Fraud Detection ESQL Module
+-- Implements rule-based fraud detection for payment transactions
+
+CREATE COMPUTE MODULE FraudDetector
+    CREATE FUNCTION Main() RETURNS BOOLEAN
+    BEGIN
+        -- Declare fraud detection variables
+        DECLARE riskScore INTEGER DEFAULT 0;
+        DECLARE fraudRules ROW;
+        DECLARE customerProfile ROW;
+        DECLARE transactionHistory ROW;
+        DECLARE geoLocation CHARACTER;
+        DECLARE deviceFingerprint CHARACTER;
+        
+        -- Extract transaction data
+        DECLARE amount DECIMAL DEFAULT InputRoot.JSON.Data.payment.amount;
+        DECLARE customerId CHARACTER DEFAULT InputRoot.JSON.Data.customer.id;
+        DECLARE merchantId CHARACTER DEFAULT InputRoot.JSON.Data.merchant.id;
+        DECLARE transactionTime TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+        
+        -- Rule 1: High Amount Transaction (Risk Score +30)
+        IF amount > 10000 THEN
+            SET riskScore = riskScore + 30;
+            SET fraudRules.highAmount = TRUE;
+        END IF;
+        
+        -- Rule 2: Off-hours Transaction (Risk Score +20)
+        DECLARE currentHour INTEGER DEFAULT EXTRACT(HOUR FROM transactionTime);
+        IF currentHour < 6 OR currentHour > 22 THEN
+            SET riskScore = riskScore + 20;
+            SET fraudRules.offHours = TRUE;
+        END IF;
+        
+        -- Rule 3: Multiple Rapid Transactions (Risk Score +40)
+        -- This would typically query a database for recent transactions
+        DECLARE recentTransactionCount INTEGER DEFAULT GetRecentTransactionCount(customerId);
+        IF recentTransactionCount > 5 THEN
+            SET riskScore = riskScore + 40;
+            SET fraudRules.rapidTransactions = TRUE;
+        END IF;
+        
+        -- Rule 4: Unusual Geographic Location (Risk Score +25)
+        SET geoLocation = InputRoot.JSON.Data.transaction.location;
+        IF NOT IsUsualLocation(customerId, geoLocation) THEN
+            SET riskScore = riskScore + 25;
+            SET fraudRules.unusualLocation = TRUE;
+        END IF;
+        
+        -- Rule 5: New Device/Browser (Risk Score +15)
+        SET deviceFingerprint = InputRoot.JSON.Data.device.fingerprint;
+        IF NOT IsKnownDevice(customerId, deviceFingerprint) THEN
+            SET riskScore = riskScore + 15;
+            SET fraudRules.newDevice = TRUE;
+        END IF;
+        
+        -- Determine fraud status based on risk score
+        DECLARE fraudStatus CHARACTER;
+        DECLARE requiresManualReview BOOLEAN DEFAULT FALSE;
+        
+        IF riskScore >= 80 THEN
+            SET fraudStatus = 'HIGH_RISK';
+            SET requiresManualReview = TRUE;
+        ELSEIF riskScore >= 50 THEN
+            SET fraudStatus = 'MEDIUM_RISK';
+            SET requiresManualReview = TRUE;
+        ELSEIF riskScore >= 20 THEN
+            SET fraudStatus = 'LOW_RISK';
+        ELSE
+            SET fraudStatus = 'APPROVED';
+        END IF;
+        
+        -- Build output message
+        SET OutputRoot = InputRoot;
+        SET OutputRoot.JSON.Data.fraudAnalysis.riskScore = riskScore;
+        SET OutputRoot.JSON.Data.fraudAnalysis.status = fraudStatus;
+        SET OutputRoot.JSON.Data.fraudAnalysis.requiresManualReview = requiresManualReview;
+        SET OutputRoot.JSON.Data.fraudAnalysis.rules = fraudRules;
+        SET OutputRoot.JSON.Data.fraudAnalysis.analyzedAt = CURRENT_TIMESTAMP;
+        SET OutputRoot.JSON.Data.fraudAnalysis.version = '1.0';
+        
+        RETURN TRUE;
+    END;
+    
+    -- Helper function to get recent transaction count
+    CREATE FUNCTION GetRecentTransactionCount(IN customerId CHARACTER) RETURNS INTEGER
+    BEGIN
+        -- In a real implementation, this would query the transaction database
+        -- For demo purposes, returning a simulated value
+        DECLARE count INTEGER DEFAULT 0;
+        
+        -- Simulate database query
+        -- SELECT COUNT(*) FROM transactions 
+        -- WHERE customer_id = customerId 
+        -- AND transaction_time > (CURRENT_TIMESTAMP - INTERVAL '1' HOUR)
+        
+        SET count = 2; -- Simulated count
+        RETURN count;
+    END;
+    
+    -- Helper function to check if location is usual for customer
+    CREATE FUNCTION IsUsualLocation(IN customerId CHARACTER, IN location CHARACTER) RETURNS BOOLEAN
+    BEGIN
+        -- In a real implementation, this would check customer's usual locations
+        -- For demo purposes, returning TRUE for domestic locations
+        IF location LIKE 'US-%' OR location LIKE 'USA-%' THEN
+            RETURN TRUE;
+        ELSE
+            RETURN FALSE;
+        END IF;
+    END;
+    
+    -- Helper function to check if device is known
+    CREATE FUNCTION IsKnownDevice(IN customerId CHARACTER, IN deviceFingerprint CHARACTER) RETURNS BOOLEAN
+    BEGIN
+        -- In a real implementation, this would check against known devices database
+        -- For demo purposes, returning TRUE if fingerprint is not empty
+        IF LENGTH(deviceFingerprint) > 0 THEN
+            RETURN TRUE;
+        ELSE
+            RETURN FALSE;
+        END IF;
+    END;
+    
+END MODULE;

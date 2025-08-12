@@ -1,0 +1,232 @@
+-- Data Validator Module for Market Data Quality Control
+-- Provides data validation and error logging for trading data
+
+CREATE COMPUTE MODULE DataValidator
+
+    -- Main validation function for market data
+    CREATE FUNCTION Main() RETURNS BOOLEAN
+    BEGIN
+        DECLARE isValid BOOLEAN DEFAULT TRUE;
+        DECLARE validationErrors CHARACTER DEFAULT '';
+        DECLARE correlationId CHARACTER;
+        
+        -- Get correlation ID
+        SET correlationId = COALESCE(InputRoot.HTTPInputHeader."X-Correlation-ID",
+                                   CommonUtils.GenerateTransactionId());
+        
+        -- Validate required fields
+        IF NOT ValidateRequiredFields() THEN
+            SET isValid = FALSE;
+            SET validationErrors = validationErrors || 'Missing required fields; ';
+        END IF;
+        
+        -- Validate data ranges
+        IF NOT ValidateDataRanges() THEN
+            SET isValid = FALSE;
+            SET validationErrors = validationErrors || 'Data out of valid ranges; ';
+        END IF;
+        
+        -- Validate data consistency
+        IF NOT ValidateDataConsistency() THEN
+            SET isValid = FALSE;
+            SET validationErrors = validationErrors || 'Data consistency check failed; ';
+        END IF;
+        
+        -- If validation failed, log error and create error response
+        IF NOT isValid THEN
+            CALL LogValidationError(validationErrors, correlationId);
+            CALL CreateValidationErrorResponse(validationErrors, correlationId);
+            RETURN FALSE;
+        END IF;
+        
+        -- Copy input to output if validation passed
+        SET OutputRoot = InputRoot;
+        
+        -- Log successful validation
+        CALL LogValidationSuccess(correlationId);
+        
+        RETURN TRUE;
+    END;
+    
+    -- Validate required fields are present
+    CREATE FUNCTION ValidateRequiredFields() RETURNS BOOLEAN
+    BEGIN
+        DECLARE requiredFields CHARACTER ARRAY;
+        SET requiredFields = LIST{'symbol', 'price', 'volume', 'timestamp'};
+        
+        DECLARE i INTEGER DEFAULT 1;
+        WHILE i <= CARDINALITY(requiredFields) DO
+            DECLARE fieldName CHARACTER DEFAULT requiredFields[i];
+            
+            IF NOT EXISTS(InputRoot.JSON.Data.{fieldName}[]) THEN
+                SET InputLocalEnvironment.Variables.MissingField = fieldName;
+                RETURN FALSE;
+            END IF;
+            
+            IF InputRoot.JSON.Data.{fieldName} IS NULL OR 
+               InputRoot.JSON.Data.{fieldName} = '' THEN
+                SET InputLocalEnvironment.Variables.MissingField = fieldName;
+                RETURN FALSE;
+            END IF;
+            
+            SET i = i + 1;
+        END WHILE;
+        
+        RETURN TRUE;
+    END;
+    
+    -- Validate data is within acceptable ranges
+    CREATE FUNCTION ValidateDataRanges() RETURNS BOOLEAN
+    BEGIN
+        DECLARE price DECIMAL DEFAULT InputRoot.JSON.Data.price;
+        DECLARE volume INTEGER DEFAULT InputRoot.JSON.Data.volume;
+        DECLARE timestamp CHARACTER DEFAULT InputRoot.JSON.Data.timestamp;
+        
+        -- Validate price range
+        IF price <= 0 OR price > 1000000 THEN
+            SET InputLocalEnvironment.Variables.InvalidField = 'price';
+            SET InputLocalEnvironment.Variables.InvalidValue = CAST(price AS CHARACTER);
+            RETURN FALSE;
+        END IF;
+        
+        -- Validate volume range
+        IF volume < 0 OR volume > 1000000000 THEN
+            SET InputLocalEnvironment.Variables.InvalidField = 'volume';
+            SET InputLocalEnvironment.Variables.InvalidValue = CAST(volume AS CHARACTER);
+            RETURN FALSE;
+        END IF;
+        
+        -- Validate timestamp format and range
+        IF NOT IsValidTimestamp(timestamp) THEN
+            SET InputLocalEnvironment.Variables.InvalidField = 'timestamp';
+            SET InputLocalEnvironment.Variables.InvalidValue = timestamp;
+            RETURN FALSE;
+        END IF;
+        
+        RETURN TRUE;
+    END;
+    
+    -- Validate data consistency
+    CREATE FUNCTION ValidateDataConsistency() RETURNS BOOLEAN
+    BEGIN
+        DECLARE symbol CHARACTER DEFAULT InputRoot.JSON.Data.symbol;
+        DECLARE price DECIMAL DEFAULT InputRoot.JSON.Data.price;
+        DECLARE previousPrice DECIMAL;
+        
+        -- Get previous price for symbol (simplified check)
+        SET previousPrice = GetLastKnownPrice(symbol);
+        
+        -- Check for unrealistic price movements (more than 50% change)
+        IF previousPrice > 0 THEN
+            DECLARE priceChange DECIMAL DEFAULT ABS(price - previousPrice) / previousPrice;
+            IF priceChange > 0.5 THEN
+                SET InputLocalEnvironment.Variables.SuspiciousChange = 'Price change: ' || 
+                    CAST(ROUND(priceChange * 100, 2) AS CHARACTER) || '%';
+                RETURN FALSE;
+            END IF;
+        END IF;
+        
+        RETURN TRUE;
+    END;
+    
+    -- Check if timestamp is valid
+    CREATE FUNCTION IsValidTimestamp(IN timestamp CHARACTER) RETURNS BOOLEAN
+    BEGIN
+        DECLARE parsedTime TIMESTAMP;
+        
+        BEGIN
+            SET parsedTime = CAST(timestamp AS TIMESTAMP);
+            
+            -- Check if timestamp is not too old (more than 1 hour)
+            DECLARE timeDiff INTERVAL;
+            SET timeDiff = CURRENT_TIMESTAMP - parsedTime;
+            
+            IF EXTRACT(HOUR FROM timeDiff) > 1 THEN
+                RETURN FALSE;
+            END IF;
+            
+            RETURN TRUE;
+        EXCEPTION
+            -- Invalid timestamp format
+            RETURN FALSE;
+        END;
+    END;
+    
+    -- Get last known price for symbol (stub - would query database)
+    CREATE FUNCTION GetLastKnownPrice(IN symbol CHARACTER) RETURNS DECIMAL
+    BEGIN
+        -- In real implementation, this would query the database
+        -- For now, return 0 to skip consistency check
+        RETURN 0.0;
+    END;
+    
+    -- Log validation error to database
+    CREATE PROCEDURE LogValidationError(
+        IN validationErrors CHARACTER,
+        IN correlationId CHARACTER
+    )
+    BEGIN
+        DECLARE errorMessage CHARACTER;
+        
+        SET errorMessage = 'Market data validation failed: ' || validationErrors ||
+                          ' Symbol: ' || COALESCE(InputRoot.JSON.Data.symbol, 'N/A') ||
+                          ' Price: ' || COALESCE(CAST(InputRoot.JSON.Data.price AS CHARACTER), 'N/A') ||
+                          ' Volume: ' || COALESCE(CAST(InputRoot.JSON.Data.volume AS CHARACTER), 'N/A');
+        
+        INSERT INTO Database.IIBCONFIG.error_log 
+        (application_name, error_type, error_message, stack_trace, correlation_id, occurred_date)
+        VALUES (
+            'TradingDataAggregator', 
+            'DATA_VALIDATION_ERROR', 
+            errorMessage,
+            'Field validation failed during market data ingestion',
+            correlationId, 
+            CURRENT_TIMESTAMP
+        );
+    END;
+    
+    -- Log successful validation
+    CREATE PROCEDURE LogValidationSuccess(IN correlationId CHARACTER)
+    BEGIN
+        INSERT INTO Database.IIBCONFIG.system_metrics 
+        (metric_name, metric_value, metric_unit, application_name, host_name, recorded_date)
+        VALUES (
+            'DATA_VALIDATION_SUCCESS', 
+            1, 
+            'count', 
+            'TradingDataAggregator', 
+            SQL.DATABASENAME,
+            CURRENT_TIMESTAMP
+        );
+    END;
+    
+    -- Create validation error response
+    CREATE PROCEDURE CreateValidationErrorResponse(
+        IN validationErrors CHARACTER,
+        IN correlationId CHARACTER
+    )
+    BEGIN
+        CREATE LASTCHILD OF OutputRoot DOMAIN('JSON');
+        SET OutputRoot.JSON.Data.error = TRUE;
+        SET OutputRoot.JSON.Data.errorType = 'DATA_VALIDATION_ERROR';
+        SET OutputRoot.JSON.Data.errorMessage = 'Market data validation failed';
+        SET OutputRoot.JSON.Data.validationErrors = validationErrors;
+        SET OutputRoot.JSON.Data.correlationId = correlationId;
+        SET OutputRoot.JSON.Data.timestamp = CAST(CURRENT_TIMESTAMP AS CHARACTER);
+        
+        -- Include invalid field details if available
+        IF EXISTS(InputLocalEnvironment.Variables.InvalidField[]) THEN
+            SET OutputRoot.JSON.Data.invalidField = InputLocalEnvironment.Variables.InvalidField;
+            SET OutputRoot.JSON.Data.invalidValue = InputLocalEnvironment.Variables.InvalidValue;
+        END IF;
+        
+        IF EXISTS(InputLocalEnvironment.Variables.MissingField[]) THEN
+            SET OutputRoot.JSON.Data.missingField = InputLocalEnvironment.Variables.MissingField;
+        END IF;
+        
+        IF EXISTS(InputLocalEnvironment.Variables.SuspiciousChange[]) THEN
+            SET OutputRoot.JSON.Data.suspiciousChange = InputLocalEnvironment.Variables.SuspiciousChange;
+        END IF;
+    END;
+
+END MODULE;

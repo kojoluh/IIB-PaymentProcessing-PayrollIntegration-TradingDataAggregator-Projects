@@ -1,0 +1,272 @@
+-- Error Handler Module for IIB ESB Financial Applications
+-- Provides comprehensive error logging and handling functionality
+
+CREATE COMPUTE MODULE ErrorHandler
+
+    -- Process general errors and log to database
+    CREATE FUNCTION ProcessError() RETURNS BOOLEAN
+    BEGIN
+        DECLARE errorMsg CHARACTER;
+        DECLARE errorCode CHARACTER;
+        DECLARE correlationId CHARACTER;
+        DECLARE applicationName CHARACTER;
+        DECLARE stackTrace CHARACTER;
+        
+        -- Extract error information
+        SET errorMsg = COALESCE(InputExceptionList.RecoverableException.Text, 
+                               InputExceptionList.*[1].Text, 
+                               'Unknown error occurred');
+        SET errorCode = COALESCE(InputExceptionList.RecoverableException.Number,
+                                InputExceptionList.*[1].Number,
+                                '0000');
+        SET correlationId = COALESCE(InputRoot.MQMD.MsgId, 
+                                   InputRoot.HTTPInputHeader."X-Correlation-ID",
+                                   CommonUtils.GenerateTransactionId());
+        SET applicationName = COALESCE(InputLocalEnvironment.Destination.RouterList.DestinationData[1].labelName,
+                                     'UnknownApp');
+        
+        -- Build stack trace from exception list
+        SET stackTrace = BuildStackTrace(InputExceptionList);
+        
+        -- Log error to database
+        CALL LogErrorToDatabase(applicationName, errorCode, errorMsg, stackTrace, correlationId);
+        
+        -- Log error to system log
+        CALL LogErrorToSystemLog(applicationName, errorCode, errorMsg, correlationId);
+        
+        -- Create error response
+        CREATE LASTCHILD OF OutputRoot DOMAIN('JSON');
+        SET OutputRoot.JSON.Data.error = TRUE;
+        SET OutputRoot.JSON.Data.errorCode = errorCode;
+        SET OutputRoot.JSON.Data.errorMessage = errorMsg;
+        SET OutputRoot.JSON.Data.correlationId = correlationId;
+        SET OutputRoot.JSON.Data.timestamp = CAST(CURRENT_TIMESTAMP AS CHARACTER);
+        
+        RETURN TRUE;
+    END;
+    
+    -- Handle validation errors specifically
+    CREATE FUNCTION ValidationError() RETURNS BOOLEAN
+    BEGIN
+        DECLARE errorDetails CHARACTER;
+        DECLARE fieldName CHARACTER;
+        DECLARE fieldValue CHARACTER;
+        
+        -- Extract validation error details
+        SET errorDetails = InputLocalEnvironment.Variables.ValidationError;
+        SET fieldName = InputLocalEnvironment.Variables.FieldName;
+        SET fieldValue = InputLocalEnvironment.Variables.FieldValue;
+        
+        -- Log validation error
+        CALL LogErrorToDatabase('PaymentProcessing', 'VALIDATION_ERROR', 
+                              'Validation failed for field: ' || fieldName || ' with value: ' || fieldValue,
+                              errorDetails,
+                              InputLocalEnvironment.Variables.TransactionId);
+        
+        -- Create validation error response
+        CREATE LASTCHILD OF OutputRoot DOMAIN('JSON');
+        SET OutputRoot.JSON.Data.error = TRUE;
+        SET OutputRoot.JSON.Data.errorType = 'VALIDATION_ERROR';
+        SET OutputRoot.JSON.Data.errorMessage = 'Invalid ' || fieldName;
+        SET OutputRoot.JSON.Data.field = fieldName;
+        SET OutputRoot.JSON.Data.value = fieldValue;
+        SET OutputRoot.JSON.Data.correlationId = InputLocalEnvironment.Variables.TransactionId;
+        SET OutputRoot.JSON.Data.timestamp = CAST(CURRENT_TIMESTAMP AS CHARACTER);
+        
+        -- Set HTTP error response
+        SET OutputLocalEnvironment.Destination.HTTP.ReplyStatusCode = 400;
+        
+        RETURN TRUE;
+    END;
+    
+    -- Handle fraud detection errors
+    CREATE FUNCTION FraudError() RETURNS BOOLEAN
+    BEGIN
+        DECLARE fraudScore INTEGER;
+        DECLARE fraudRules CHARACTER;
+        DECLARE transactionId CHARACTER;
+        
+        -- Extract fraud error details
+        SET fraudScore = InputLocalEnvironment.Variables.FraudScore;
+        SET fraudRules = InputLocalEnvironment.Variables.TriggeredRules;
+        SET transactionId = InputLocalEnvironment.Variables.TransactionId;
+        
+        -- Log fraud error
+        CALL LogErrorToDatabase('PaymentProcessing', 'FRAUD_DETECTED', 
+                              'Fraud detected with score: ' || CAST(fraudScore AS CHARACTER) || 
+                              ', Rules: ' || fraudRules,
+                              'Transaction blocked due to fraud detection',
+                              transactionId);
+        
+        -- Log fraud incident for compliance
+        CALL LogFraudIncident(transactionId, fraudScore, fraudRules);
+        
+        -- Create fraud error response
+        CREATE LASTCHILD OF OutputRoot DOMAIN('JSON');
+        SET OutputRoot.JSON.Data.error = TRUE;
+        SET OutputRoot.JSON.Data.errorType = 'FRAUD_DETECTED';
+        SET OutputRoot.JSON.Data.errorMessage = 'Transaction blocked due to suspected fraud';
+        SET OutputRoot.JSON.Data.fraudScore = fraudScore;
+        SET OutputRoot.JSON.Data.transactionId = transactionId;
+        SET OutputRoot.JSON.Data.timestamp = CAST(CURRENT_TIMESTAMP AS CHARACTER);
+        
+        -- Set HTTP error response
+        SET OutputLocalEnvironment.Destination.HTTP.ReplyStatusCode = 403;
+        
+        RETURN TRUE;
+    END;
+    
+    -- Handle market data parsing errors
+    CREATE FUNCTION ParseError() RETURNS BOOLEAN
+    BEGIN
+        DECLARE dataSource CHARACTER;
+        DECLARE parseError CHARACTER;
+        DECLARE rawData BLOB;
+        
+        -- Extract parsing error details
+        SET dataSource = InputLocalEnvironment.Variables.DataSource;
+        SET parseError = InputExceptionList.*[1].Text;
+        SET rawData = InputBody.BLOB.BLOB;
+        
+        -- Log parsing error
+        CALL LogErrorToDatabase('TradingDataAggregator', 'PARSE_ERROR', 
+                              'Failed to parse data from: ' || dataSource || ', Error: ' || parseError,
+                              'Raw data length: ' || CAST(LENGTH(rawData) AS CHARACTER),
+                              CommonUtils.GenerateTransactionId());
+        
+        -- Create parse error response
+        CREATE LASTCHILD OF OutputRoot DOMAIN('JSON');
+        SET OutputRoot.JSON.Data.error = TRUE;
+        SET OutputRoot.JSON.Data.errorType = 'PARSE_ERROR';
+        SET OutputRoot.JSON.Data.errorMessage = 'Failed to parse market data';
+        SET OutputRoot.JSON.Data.source = dataSource;
+        SET OutputRoot.JSON.Data.timestamp = CAST(CURRENT_TIMESTAMP AS CHARACTER);
+        
+        RETURN TRUE;
+    END;
+    
+    -- Log error to PostgreSQL database
+    CREATE PROCEDURE LogErrorToDatabase(
+        IN appName CHARACTER,
+        IN errorType CHARACTER, 
+        IN errorMessage CHARACTER,
+        IN stackTrace CHARACTER,
+        IN correlationId CHARACTER
+    )
+    BEGIN
+        INSERT INTO Database.IIBCONFIG.error_log 
+        (application_name, error_type, error_message, stack_trace, correlation_id, occurred_date)
+        VALUES (appName, errorType, errorMessage, stackTrace, correlationId, CURRENT_TIMESTAMP);
+    END;
+    
+    -- Log error to system log (for monitoring tools)
+    CREATE PROCEDURE LogErrorToSystemLog(
+        IN appName CHARACTER,
+        IN errorCode CHARACTER,
+        IN errorMessage CHARACTER,
+        IN correlationId CHARACTER
+    )
+    BEGIN
+        DECLARE logEntry CHARACTER;
+        
+        -- Format log entry
+        SET logEntry = '[' || CAST(CURRENT_TIMESTAMP AS CHARACTER) || '] ' ||
+                      'ERROR - App: ' || appName || 
+                      ', Code: ' || errorCode ||
+                      ', Message: ' || errorMessage ||
+                      ', CorrelationId: ' || correlationId;
+        
+        -- Write to system log using LOG function
+        LOG EVENT VALUES(logEntry);
+    END;
+    
+    -- Log fraud incidents for compliance reporting
+    CREATE PROCEDURE LogFraudIncident(
+        IN transactionId CHARACTER,
+        IN fraudScore INTEGER,
+        IN triggeredRules CHARACTER
+    )
+    BEGIN
+        INSERT INTO Database.PAYMENTDB.fraud_detection_log 
+        (transaction_id, rule_name, risk_score, fraud_indicators, created_date)
+        VALUES (transactionId, 'SYSTEM_FRAUD_CHECK', fraudScore, triggeredRules, CURRENT_TIMESTAMP);
+    END;
+    
+    -- Build detailed stack trace from exception list
+    CREATE FUNCTION BuildStackTrace(IN exceptionList REFERENCE) RETURNS CHARACTER
+    BEGIN
+        DECLARE stackTrace CHARACTER DEFAULT '';
+        DECLARE exceptionRef REFERENCE TO exceptionList.*[1];
+        DECLARE counter INTEGER DEFAULT 1;
+        
+        WHILE LASTMOVE(exceptionRef) DO
+            SET stackTrace = stackTrace || 'Exception ' || CAST(counter AS CHARACTER) || ': ';
+            
+            IF EXISTS(exceptionRef.Number[]) THEN
+                SET stackTrace = stackTrace || 'Code=' || CAST(exceptionRef.Number AS CHARACTER) || ', ';
+            END IF;
+            
+            IF EXISTS(exceptionRef.Text[]) THEN
+                SET stackTrace = stackTrace || 'Message=' || exceptionRef.Text || ', ';
+            END IF;
+            
+            IF EXISTS(exceptionRef.Catalog[]) THEN
+                SET stackTrace = stackTrace || 'Catalog=' || exceptionRef.Catalog || ', ';
+            END IF;
+            
+            IF EXISTS(exceptionRef.Severity[]) THEN
+                SET stackTrace = stackTrace || 'Severity=' || CAST(exceptionRef.Severity AS CHARACTER);
+            END IF;
+            
+            SET stackTrace = stackTrace || '\n';
+            MOVE exceptionRef NEXTSIBLING;
+            SET counter = counter + 1;
+        END WHILE;
+        
+        RETURN stackTrace;
+    END;
+    
+    -- Create error metrics for monitoring
+    CREATE PROCEDURE CreateErrorMetrics(
+        IN appName CHARACTER,
+        IN errorType CHARACTER,
+        IN errorCount INTEGER
+    )
+    BEGIN
+        INSERT INTO Database.IIBCONFIG.system_metrics 
+        (metric_name, metric_value, metric_unit, application_name, host_name, recorded_date)
+        VALUES (
+            errorType || '_ERROR_COUNT', 
+            errorCount, 
+            'count', 
+            appName, 
+            SQL.DATABASENAME,
+            CURRENT_TIMESTAMP
+        );
+    END;
+    
+    -- Send error alerts to monitoring systems
+    CREATE PROCEDURE SendErrorAlert(
+        IN appName CHARACTER,
+        IN errorType CHARACTER,
+        IN errorMessage CHARACTER,
+        IN severity CHARACTER
+    )
+    BEGIN
+        DECLARE alertPayload CHARACTER;
+        
+        -- Create alert payload
+        SET alertPayload = '{' ||
+            '"application": "' || appName || '",' ||
+            '"errorType": "' || errorType || '",' ||
+            '"message": "' || errorMessage || '",' ||
+            '"severity": "' || severity || '",' ||
+            '"timestamp": "' || CAST(CURRENT_TIMESTAMP AS CHARACTER) || '",' ||
+            '"hostname": "' || SQL.DATABASENAME || '"' ||
+        '}';
+        
+        -- Send to monitoring queue
+        PROPAGATE TO TERMINAL 'out' MESSAGE alertPayload;
+    END;
+
+END MODULE;
